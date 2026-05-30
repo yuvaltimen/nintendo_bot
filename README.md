@@ -181,17 +181,25 @@ If the Switch can't see the Pi, `pad.pair()` hangs indefinitely with no error. C
 - Is something else holding the BT adapter? See `PI_CONTROLLER.md` §5.1.
 - Bonding failing with `Authentication Failure (0x05)`? See §5.7.
 
-### Stick tilts block for the duration
+### Stick tilts and presses can't overlap from Python; use a macro
 
-`pad.tilt(Sticks.LEFT_STICK, x=100, duration=1.0)` doesn't return for 1 second. If you need to press a button *while* a stick is held, use a macro:
+`pad.tilt(Sticks.LEFT_STICK, x=100, duration=1.0)` blocks for the full second and recenters on return. `pad.press` and `pad.tilt` can't be made to overlap because each call writes a complete controller state for its duration. For concurrent inputs (holding stick + pressing button), use the macro DSL — everything on one line fires together:
+
+```python
+pad.macro("L_STICK@+100+000 A 1.0s")        # stick right + A, both for 1s
+```
+
+To hold the stick across multiple button presses, re-state it on every line:
 
 ```python
 pad.macro("""
-    LEFT_STICK@+100+000 1.0s A 0.1s
+    L_STICK@+100+000 A 0.1s
+    L_STICK@+100+000 0.4s
+    L_STICK@+100+000 B 0.1s
 """)
 ```
 
-(See nxbt's macro DSL for the full syntax.)
+Stick syntax notes: name is `L_STICK` / `R_STICK` (not `LEFT_STICK`); both axes are 3 digits with mandatory sign (`L_STICK@-075+050`). See nxbt's `docs/Macros.md` for the full DSL.
 
 ### macro DSL newlines matter
 
