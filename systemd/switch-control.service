@@ -1,0 +1,19 @@
+[Unit]
+Description=Switch Control Daemon (nxbt HTTP frontend)
+After=bluetooth.target network.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/yuvaltimen/Coding/nintendo
+ExecStart=/home/yuvaltimen/nxbt/.venv/bin/python /home/yuvaltimen/Coding/nintendo/scripts/pi_daemon.py
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=SWITCH_CONTROL_PORT=8765
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

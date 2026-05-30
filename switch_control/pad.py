@@ -1,4 +1,4 @@
-"""Ergonomic wrapper around nxbt. Pi-only — imports nxbt at module load."""
+"""Local Pi-side wrapper around nxbt. Imports nxbt at module load (Pi only)."""
 
 import time
 
@@ -24,14 +24,13 @@ class SwitchPad:
 
     def __exit__(self, exc_type, exc, tb):
         if self.idx is not None:
-            # Swallow: the Switch may have already torn down the link.
+            # The Switch may have already torn down the link.
             try:
                 self.nx.remove_controller(self.idx)
             except Exception:
                 pass
 
     def pair(self, reconnect=True):
-        """Create the virtual controller and block until the Switch bonds."""
         kwargs = {}
         if reconnect:
             addrs = self.nx.get_switch_addresses()
@@ -42,24 +41,19 @@ class SwitchPad:
         return self
 
     def wait_for_ready(self, prompt="Press Enter when the script should take over... "):
-        """Idle the script. Joycons drive the Switch while this is blocking."""
         try:
             input(prompt)
         except (EOFError, KeyboardInterrupt):
             print()
 
     def press(self, *buttons, hold=0.1):
-        """Press a button (or combo) for `hold` seconds."""
         self.nx.press_buttons(self.idx, list(buttons), down=hold)
 
     def tilt(self, stick, x=0, y=0, duration=0.5):
-        """Tilt a stick to (x, y) in [-100..100] for `duration` seconds, then recenter."""
         self.nx.tilt_stick(self.idx, stick, x=x, y=y, tilted=duration)
 
     def macro(self, script, block=True):
-        """Run an nxbt macro DSL string (e.g. 'A 0.1s\\n0.5s\\nB 0.1s')."""
         return self.nx.macro(self.idx, script, block=block)
 
     def sleep(self, seconds):
-        """time.sleep, re-exposed so scripts don't need their own import."""
         time.sleep(seconds)
