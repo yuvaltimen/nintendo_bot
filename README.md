@@ -6,6 +6,33 @@ The end goal: plug an HDMI capture card into the Mac, run YOLO + LLM on the capt
 
 ---
 
+## SHORTCUT:
+
+On the Switch:
+
+`Go to Controller Pairing screen`
+
+On the Pi:
+```
+sudo PYTHONUNBUFFERED=1 /home/yuvaltimen/nxbt/.venv/bin/python scripts/pi_daemon.py
+```
+
+From the Mac:
+```python
+python scripts/interactive.py
+
+# To connect and exit:
+pad.press(Buttons.A)  # x2
+
+# Or 
+
+python scripts/botw_macros.py horizontal_scan
+```
+
+
+
+---
+
 ## Resume a session
 
 Pi already set up and paired at least once? This is all you need:
