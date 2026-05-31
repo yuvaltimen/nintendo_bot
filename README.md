@@ -30,6 +30,60 @@ python scripts/botw_macros.py horizon_scan
 ```
 
 
+## USB Bluetooth dongle (if no Ethernet available)
+                                                                                                    
+A USB BT dongle has its own antenna completely separate from the Wi-Fi chip. Onboard Wi-Fi keeps
+working; the USB dongle handles the Switch connection.                                              
+                                                                 
+Buy: any USB Bluetooth 4.0+ dongle based on the Cambridge Silicon Radio (CSR8510) chip — widely     
+available for ~$10, well-supported by BlueZ. Avoid Broadcom-based USB dongles.                    
+                                                                                                    
+Setup:                                                                                            
+                                       
+### 1. Plug in the dongle. Verify BlueZ sees it:                                                    
+hciconfig -a 
+
+```
+Should show hci0 (onboard) and hci1 (USB dongle)
+```                                                  
+ 
+### 2. Disable the onboard BT chip so nxbt picks up the USB dongle:
+
+```
+sudo rfkill block $(rfkill list | awk '/hci0/{print prev} {prev=$1}' | tr -d :)
+```
+
+##### Simpler alternative — disable onboard BT at firmware level (permanent):
+
+```
+echo 'dtoverlay=disable-bt' | sudo tee -a /boot/firmware/config.txt                                 
+sudo reboot                                                                                         
+```                                                                              
+### 3. After reboot, the USB dongle is now hci0. Verify:                                              
+
+```
+hciconfig -a    # should show one adapter: the USB dongle                                         
+rfkill list     # bluetooth should be unblocked
+```                                                     
+                                                                 
+### 4. The BlueZ --noplugin=input override still applies (already configured).                        
+### 5. Restart the daemon:     
+```
+sudo systemctl restart switch-control                                                               
+```                                                                                                  
+dtoverlay=disable-bt disables the UART connection to the BCM43455's BT module while leaving the SDIO
+ connection (Wi-Fi) untouched. Wi-Fi keeps working. The USB dongle becomes the only BT adapter BlueZ
+ and nxbt will see.                                                                                 
+                                                                 
+Verify it's working:                                                                                
+                                                                                                  
+### Watch the daemon start up and confirm it connects:                                                
+sudo journalctl -u switch-control -f                             
+                                                                                                    
+### From the Mac:                                                                                   
+curl -s http://raspberrypi.local:8765/status | python3 -m json.tool                                 
+# connected should be true with no repeated crashes      
+
 
 ---
 
