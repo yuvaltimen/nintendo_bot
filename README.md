@@ -1,10 +1,34 @@
 # Switch Control
 
-A Mac-driven command-and-control system for a Nintendo Switch. The Raspberry Pi runs a long-lived daemon that holds a virtual Pro Controller's Bluetooth connection forever and exposes an HTTP API; your Mac sends commands to it. The Pi becomes "just a Bluetooth controller" from your perspective — same as your physical joycons.
+A Mac-driven command-and-control system for a Nintendo Switch. The Raspberry Pi runs a long-lived daemon that holds a virtual Pro Controller's Bluetooth connection and exposes an HTTP API; your Mac sends commands to it.
 
-The end goal is to plug an HDMI capture card into the Mac, run a YOLO model + LLM on the captured frames, and have the LLM call the same HTTP API to play prompted scenarios. The architecture in this repo is built to scale into that shape: the LLM is just another client of the daemon.
+The end goal: plug an HDMI capture card into the Mac, run YOLO + LLM on the captured frames, and have the LLM call the same HTTP API to play prompted scenarios. The architecture scales into that shape — the LLM is just another client of the daemon.
 
-For Pi-side Bluetooth setup, troubleshooting, and the bluetoothctl D-Bus agent workaround, see `PI_CONTROLLER.md`. This README assumes that's done.
+---
+
+## Resume a session
+
+Pi already set up and paired at least once? This is all you need:
+
+```bash
+# 1. Start (or confirm) the daemon on the Pi
+ssh pi "sudo systemctl start switch-control"
+
+# 2. Wake the Switch — press any button on your joycons
+
+# 3. Open the interactive REPL on your Mac
+python scripts/interactive.py
+
+# 4. Or run a BotW macro directly
+python scripts/botw_macros.py --list
+python scripts/botw_macros.py casual_stroll
+```
+
+The daemon reconnects to the Switch within ~10 seconds of it waking. If `systemctl start` says the unit is already running, that's fine — it's a no-op.
+
+> **Something broken?** → [Troubleshooting](#troubleshooting) below, or the deep BT diagnosis tree in `PI_CONTROLLER.md`.
+
+---
 
 ## Architecture
 
@@ -19,178 +43,192 @@ Raspberry Pi
 Nintendo Switch  ←  (your real joycons paired in parallel)
 ```
 
-The daemon keeps the BT pad connected across many of your script runs. It heartbeats every 5 seconds and auto-reconnects on drop. Your Mac scripts are stateless clients — start, send commands, exit; the BT link survives.
+The daemon keeps the BT pad connected across many script runs. It heartbeats every 5 seconds and auto-reconnects on drop. Mac scripts are stateless clients — start, send commands, exit; the BT link survives.
 
-## One-time setup
+---
 
-### Pi: install the daemon dependencies
+## One-time Pi setup
+
+Do this once on a fresh Pi. If the daemon is already running successfully, skip this entire section.
+
+> For full step-by-step detail and debugging at every step, see `PI_CONTROLLER.md`. This section gives the commands only.
+
+### 1. Flash the Pi
+
+Use Raspberry Pi Imager → Raspberry Pi OS 64-bit (Bookworm). In advanced options: hostname (`pi`), SSH enabled, Wi-Fi configured, username `yuvaltimen`.
 
 ```bash
-# On the Pi, in the existing nxbt venv
+ssh yuvaltimen@pi.local
+sudo apt update && sudo apt full-upgrade -y && sudo reboot
+```
+
+### 2. Disable the BlueZ `input` plugin
+
+Without this, nxbt throws `Address already in use` on PSM 17 or 19.
+
+```bash
+# Check your bluetoothd path:
+systemctl cat bluetooth | grep ExecStart
+
+sudo mkdir -p /etc/systemd/system/bluetooth.service.d
+sudo tee /etc/systemd/system/bluetooth.service.d/override.conf > /dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/libexec/bluetooth/bluetoothd --noplugin=input
+EOF
+
+sudo systemctl daemon-reload && sudo systemctl restart bluetooth
+
+# Verify:
+systemctl cat bluetooth | grep ExecStart    # must show --noplugin=input
+rfkill list bluetooth                       # Soft blocked: no
+```
+
+Substitute the exact `bluetoothd` path from `systemctl cat` if yours differs from `/usr/libexec/bluetooth/bluetoothd`.
+
+### 3. Install Python 3.11.9 via pyenv
+
+`dbus-python` (an nxbt dependency) fails to build on Python 3.12+.
+
+```bash
+sudo apt install -y \
+  build-essential pkg-config git curl xz-utils bluetooth bluez \
+  libbluetooth-dev libdbus-1-dev libglib2.0-dev libssl-dev zlib1g-dev \
+  libbz2-dev libreadline-dev libsqlite3-dev libffi-dev liblzma-dev \
+  libncursesw5-dev tk-dev libxml2-dev libxmlsec1-dev
+
+curl https://pyenv.run | bash
+# Follow the installer's instructions to add pyenv to ~/.bashrc, then:
+source ~/.bashrc
+pyenv install 3.11.9    # ~20 minutes on Pi 4
+```
+
+### 4. Install nxbt and daemon dependencies
+
+```bash
+mkdir -p ~/nxbt && cd ~/nxbt
+pyenv local 3.11.9
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip setuptools wheel
+pip install nxbt
 sudo /home/yuvaltimen/nxbt/.venv/bin/pip install fastapi uvicorn pydantic
 ```
 
-### Pi: sync this repo onto the Pi
+### 5. Sync this repo to the Pi
 
 ```bash
-# From your Mac, once (and after any daemon code changes — script-level
-# edits don't need a re-sync since they run on the Mac)
+# From your Mac:
 rsync -av --delete --exclude='__pycache__' --exclude='.venv' --exclude='.git' \
   /Users/yuvaltimen/Coding/nintendo/ pi:~/Coding/nintendo/
 ```
 
-### Pi: start the daemon
+Re-run this any time you change daemon code (`switch_control/daemon.py` or `switch_control/pad.py`). Script-only changes don't need a re-sync — they run on the Mac.
 
-Manual (good for first run / debugging):
+### 6. First-time pair
+
+Put the Switch on `Controllers → Change Grip/Order`. Start the daemon manually so you can watch the logs:
+
 ```bash
 ssh pi
-cd ~/Coding/nintendo
-sudo PYTHONUNBUFFERED=1 /home/yuvaltimen/nxbt/.venv/bin/python scripts/pi_daemon.py
+sudo PYTHONUNBUFFERED=1 /home/yuvaltimen/nxbt/.venv/bin/python ~/Coding/nintendo/scripts/pi_daemon.py
 ```
 
-You should see log lines like:
-```
-[INFO] daemon: starting daemon on 0.0.0.0:8765
-[INFO] daemon: bluetoothctl D-Bus agent started (pid=...)
-INFO:     Uvicorn running on http://0.0.0.0:8765
-[INFO] daemon: connected (reconnect_count=1)
-```
+Watch for `[INFO] daemon: connected`. The Switch shows a new Pro Controller on the Change Grip/Order screen. After the first successful pair the Switch remembers the Pi's MAC forever — reconnects are automatic from here on.
 
-If this is your first-time pair, put the Switch on Change Grip/Order before starting the daemon. After that, the Pi remembers the Switch's MAC and reconnects automatically on every daemon start.
+> **Pairing fails?** → `PI_CONTROLLER.md` §Wipe stale state + §Authentication Failure for the full diagnosis tree.
 
-### Pi: optional autostart via systemd
+### 7. Enable autostart (optional but recommended)
 
-After the daemon works manually, install the unit so it starts at boot:
 ```bash
 sudo cp ~/Coding/nintendo/systemd/switch-control.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now switch-control
-sudo journalctl -u switch-control -f       # tail logs
+sudo journalctl -u switch-control -f      # confirm it started
 ```
-Now the Pi is fully autonomous: power it on, it pairs with the Switch, the API is live on port 8765. You can leave the Pi headless.
 
-### Mac: nothing
+With this, powering on the Pi is enough — the daemon starts, reconnects to the Switch, and the API is live on port 8765.
+
+---
+
+## Mac: nothing
 
 The client is stdlib-only. No pip install on the Mac. Set the Pi hostname once:
+
 ```bash
-# in ~/.zshrc on your Mac
-export PI_HOST=pi.local          # or the Pi's IP
+# ~/.zshrc
+export PI_HOST=pi.local    # or the Pi's IP address
 ```
 
-## The dev loop
+---
 
-This is the UX upgrade. Compared to the old setup where every iteration was edit→rsync→ssh→sudo→python:
+## The dev loop
 
 ```
 edit a script on your Mac  →  python scripts/foo.py  →  watch the Switch
 ```
 
-That's it. No SSH between iterations. No rsync. The Pi daemon is always up; your Mac script connects, sends commands, exits. Iteration cycle: ~1 second.
+No SSH between iterations. No rsync. The Pi daemon is always up; Mac scripts connect, send commands, and exit. Iteration cycle: ~1 second.
 
-A daemon code change still requires a sync + daemon restart on the Pi (`sudo systemctl restart switch-control` if you installed the unit), but you'll rarely touch the daemon.
+A daemon code change still requires a sync + `sudo systemctl restart switch-control` on the Pi, but you'll rarely touch the daemon.
 
-## The two ways to drive
+---
 
-### Mode 1: interactive REPL — for exploring
+## Two ways to drive
+
+### Mode 1: Interactive REPL — for exploring
 
 ```bash
 python scripts/interactive.py
 ```
 
-Drops you into a Python REPL on your Mac with `pad`, `Buttons`, `Sticks` pre-bound. Every line you type fires immediately over HTTP to the Pi. Best for learning new combos, exploring game state, or debugging timing.
+Drops you into a Python REPL on your Mac with `pad`, `Buttons`, `Sticks` pre-bound. Every line fires immediately over HTTP to the Pi. Best for prototyping combos, debugging timing, and exploring game state.
 
 ```python
 >>> pad.press(Buttons.A)
->>> pad.press(Buttons.A, hold=2.0)
+>>> pad.press(Buttons.B, hold=2.0)
 >>> pad.macro("L_STICK@+100+000 A 1.0s")
+>>> pad.tilt(Sticks.LEFT_STICK, x=0, y=100, duration=1.5)
 >>> pad.status()
 {'state': 'connected', 'connected': True, 'reconnect_count': 3, ...}
 ```
 
-Ctrl-D to exit. The pad stays connected on the Pi — your next REPL session picks up instantly.
+Ctrl-D to exit. The pad stays connected on the Pi.
 
-### Mode 2: handoff scripts — for replaying
+### Mode 2: Handoff scripts — for replaying
 
 ```bash
 python scripts/example_handoff.py
+python scripts/botw_macros.py casual_stroll
 ```
 
-Pre-written sequences with `pad.wait_for_ready("...")` pauses between sections so you can drive with joycons (navigate menus, position your character) before letting the script fire the next macro.
+Pre-written sequences with `pad.wait_for_ready("...")` pauses between sections. You drive with joycons to position Link, press Enter, the script fires the next macro.
 
-```python
-from switch_control import RemotePad, Buttons, Sticks
-pad = RemotePad(os.environ["PI_HOST"])
+**Typical workflow:** prototype in the REPL until a sequence feels right, paste the macro string into a handoff script for repeatable replay.
 
-pad.wait_connected()
-pad.wait_for_ready("Get into BOTW. Enter to hand off.")
-pad.press(Buttons.A)
-pad.macro("""
-    L_STICK@+000+100 B 0.7s
-    L_STICK@+000+100 B X 0.1s
-    L_STICK@+000+100 0.5s
-    L_STICK@+000+100 X 0.1s
-""")
-pad.wait_for_ready("Back to you. Enter to exit.")
-```
-
-**Typical workflow:** prototype in interactive mode until a sequence works, then paste it into a handoff script for replay.
+---
 
 ## Joycons + Pi pad in parallel
 
-The Switch accepts inputs from every paired controller at once. Your real joycons stay paired the entire time; whichever side is sending inputs wins. So:
-- **Script idling** (blocked on `wait_for_ready`) → only your joycons drive.
+The Switch accepts inputs from every paired controller at once. Whichever side is sending inputs wins:
+
+- **Script paused** on `wait_for_ready` → only your joycons drive.
 - **Script running a macro** → script drives.
 
-Handoff is just the script pausing on `input()`.
+Handoff is just the script blocking on `input()`. Your joycons stay paired the entire time.
 
-## Pairing and recovery
+---
 
-### First-ever pair
+## Macro DSL
 
-Switch must be on `Controllers → Change Grip/Order`. Then either:
-- Start the daemon manually (it tries to pair on startup), OR
-- If the daemon is already running but no Switch has ever paired: `pad.pair_fresh()` from the Mac REPL.
-
-### Every subsequent connection
-
-Just run a Mac script. The Pi daemon already has the Switch's MAC bonded. If the Pi reboots, the daemon reconnects on startup. If the Switch was off, wake it; the daemon's watchdog will reconnect within ~10 seconds.
-
-### Auto-reconnect
-
-The daemon's watchdog runs a no-op heartbeat macro every 5 seconds. After two failed heartbeats it triggers a reconnect. From your Mac, this looks like:
-1. A command fails with `NotConnected: pad not connected (state=reconnecting)`.
-2. ~5-10 seconds later, `pad.status()["connected"]` returns `True` again.
-3. Next command works.
-
-If you want a command to survive reconnects automatically:
-```python
-pad.run_resilient(lambda p: p.macro("..."), retries=1, recover_timeout=20)
-```
-
-### Manual recovery
-
-If the BT drops and you don't want to wait for the watchdog:
-```python
-pad.reconnect()              # async; returns immediately
-pad.wait_connected()         # block until daemon reports connected
-```
-
-If a fresh first-time pair is needed (e.g., the Switch forgot the Pi):
-```python
-# Put Switch on Change Grip/Order first
-pad.pair_fresh()
-pad.wait_connected()
-```
-
-## Macro DSL essentials
-
-Macros are the primary input language. Everything on one line fires simultaneously for the trailing duration; anything not on the next line is released.
+Macros are the primary input language. Everything on one line fires simultaneously for the trailing duration; anything not restated on the next line is released.
 
 ```python
-pad.macro("L_STICK@+100+000 A 1.0s")   # stick right + A simultaneously, 1s
+pad.macro("L_STICK@+100+000 A 1.0s")    # stick right + A together for 1 second
 ```
 
 Hold a stick across multiple presses — restate it on every line:
+
 ```python
 pad.macro("""
     L_STICK@+000+100 A 0.1s
@@ -200,6 +238,7 @@ pad.macro("""
 ```
 
 Loops:
+
 ```python
 pad.macro("""
     LOOP 5
@@ -208,90 +247,209 @@ pad.macro("""
 """)
 ```
 
-Stick syntax: `L_STICK` / `R_STICK` (not `LEFT_STICK`). Both axes are 3 digits with mandatory sign: `L_STICK@-075+050`. Sum can exceed 100 for diagonals.
+**Stick syntax:** `L_STICK` / `R_STICK` (not `LEFT_STICK`). Both axes are 3 digits with mandatory sign: `L_STICK@-075+050`. Diagonal magnitudes can each exceed 100.
 
-Full reference: `/Users/yuvaltimen/Coding/nxbt/docs/Macros.md`.
+**Coordinate convention:**
+- X axis: `-100` = hard left, `+100` = hard right
+- Y axis: `+100` = forward, `-100` = backward (same for R_STICK camera)
 
-## Example: BOTW paraglide
+**Full DSL reference:** `~/nxbt/docs/Macros.md` on the Pi (or `/Users/yuvaltimen/Coding/nxbt/docs/Macros.md` locally).
 
-Stand Link at a cliff edge with the paraglider unlocked and stamina available:
-```python
-pad.macro("""
-    L_STICK@+000+100 B 0.7s
-    L_STICK@+000+100 B X 0.1s
-    L_STICK@+000+100 0.5s
-    L_STICK@+000+100 X 0.1s
-    LOOP 2
-        L_STICK@-080+080 1.2s
-        L_STICK@+080+080 1.2s
-    L_STICK@+000+100 0.8s
-""")
+---
+
+## BotW macros
+
+`scripts/botw_macros.py` has 15 ready-to-run macros across three categories. Each function has a docstring describing the required game-state setup.
+
+| Category | Macros |
+|---|---|
+| Town | `casual_stroll`, `npc_interact`, `sneaky_passage`, `shop_browse` |
+| Combat | `attack_combo`, `shield_parry`, `aerial_attack`, `bow_volley` |
+| Explore | `paraglide_swing`, `cliff_climb`, `horizon_scan`, `call_and_ride`, `cook_meal`, `map_survey`, `sprint_jump_glide` |
+
+```bash
+# List all macros with descriptions:
+python scripts/botw_macros.py --list
+
+# Run one macro (with a handoff prompt):
+python scripts/botw_macros.py casual_stroll
+
+# Run all in sequence (prompts between each):
+python scripts/botw_macros.py
 ```
-Sprint forward, running jump, deploy paraglider mid-air, pendulum left-right twice, settle for landing. Demonstrates concurrent inputs (stick + B + X), state-by-restatement, and `LOOP`.
 
-## Future: LLM/YOLO as a client
+From the interactive REPL:
 
-The HTTP API is the only public surface. An autonomous agent looks like:
 ```python
-while True:
-    frame = capture_card.read()                       # HDMI frame
-    decision = llm.decide(frame, scenario_prompt)    # YOLO bboxes + Claude
-    pad.macro(decision.macro)                         # send to Pi
+>>> import sys; sys.path.insert(0, '.')
+>>> from scripts.botw_macros import *
+>>> casual_stroll(pad)    # or any other macro name
 ```
 
-The daemon's auto-reconnect means the agent doesn't need to handle BT drops itself. The OpenAPI schema at `http://pi:8765/docs` is auto-generated by FastAPI and can be fed to the LLM for tool-use.
+---
 
-## Awkward UX — read once
+## Pairing and recovery
 
-### The daemon needs sudo to access BlueZ HCI
-The systemd unit runs as root. The manual command uses `sudo`. There's no way around this — nxbt needs raw HCI access.
+### First-ever pair
 
-### The bluetoothctl D-Bus agent must be running
-The daemon spawns it as a subprocess at startup. If you ever bring up nxbt without this daemon and bonding fails with `Authentication Failure (0x05)`, you've hit the issue from PI_CONTROLLER.md §5.7d. The daemon handles this automatically.
+Switch must be on `Controllers → Change Grip/Order`. Then either:
+- Start the daemon — it tries to pair on startup, or
+- If the daemon is already running: `pad.pair_fresh()` from the REPL.
 
-### Wi-Fi/BT antenna sharing on Pi 4
-Same caveat as before: the Pi 4's onboard radios share an antenna, and sustained BT traffic during macros can be interrupted by Wi-Fi load. If you see frequent reconnects under load, either disable Wi-Fi (`sudo rfkill block wifi`) with the Pi on Ethernet, or use an external USB Bluetooth dongle. The "controller disconnected" overlay you see on the Switch is this dropout — the daemon's watchdog should clear it within ~10s.
+### Every subsequent connection
 
-### Long macros and reconnects
-If the BT drops in the middle of a 30-second macro, the macro endpoint returns `NotConnected` and the macro is lost. After the watchdog reconnects, re-issue the macro. For mission-critical sequences, break long macros into smaller chunks with `pad.run_resilient`.
+Just run a Mac script. The Pi daemon has the Switch's MAC bonded. If the Pi rebooted, the daemon reconnects on startup. If the Switch was off, wake it — the watchdog reconnects within ~10 seconds.
 
-### mDNS (`pi.local`)
-If `pi.local` doesn't resolve from your Mac, use the Pi's IP address directly. Check with `ip addr` on the Pi or your router's DHCP table.
+### Auto-reconnect
 
-### Switch sleep kills the BT link
-Switch auto-sleep drops the controller bond. Disable auto-sleep for long automation sessions: System Settings → Sleep Mode → Auto-Sleep → Never. The watchdog will still reconnect after the Switch wakes, but the disruption is annoying.
+The watchdog heartbeats every 5 seconds. After two missed heartbeats it triggers a reconnect. From your Mac this looks like:
 
-### Don't run the daemon and the old direct scripts at the same time
-Only one nxbt process can hold the BT adapter. If you have the daemon running and try to run a script that imports `switch_control.pad.SwitchPad` directly, it'll fight the daemon. Use the client (`RemotePad`) for everything.
+1. A command fails: `NotConnected: pad not connected (state=reconnecting)`.
+2. ~10 seconds later `pad.status()["connected"]` returns `True`.
+3. Next command works normally.
+
+To make a command survive a reconnect automatically:
+
+```python
+pad.run_resilient(lambda p: p.macro("..."), retries=1, recover_timeout=20)
+```
+
+### Manual recovery
+
+```python
+pad.reconnect()       # async trigger, returns immediately
+pad.wait_connected()  # block until daemon reports connected
+```
+
+Force a fresh pair (Switch has forgotten the Pi):
+
+```python
+# Put Switch on Change Grip/Order first
+pad.pair_fresh()
+pad.wait_connected()
+```
+
+---
+
+## Known gotchas
+
+**Daemon needs sudo** — nxbt needs raw HCI access. The systemd unit runs as root; the manual command uses `sudo`. No way around this.
+
+**bluetoothctl D-Bus agent** — the daemon spawns it automatically at startup. If you ever see `Authentication Failure (0x05)` running nxbt outside the daemon, this is why. The daemon handles it transparently.
+
+**Wi-Fi/BT antenna sharing on Pi 4** — the onboard radios share an antenna. Under heavy BT traffic, Wi-Fi load can cause reconnects. Fix: use Ethernet and `sudo rfkill block wifi`, or use a USB Bluetooth dongle.
+
+**Long macros and reconnects** — if BT drops mid-macro, the endpoint returns `NotConnected` and the macro is lost. After the watchdog reconnects, re-issue it. Break long sequences into chunks wrapped in `pad.run_resilient`.
+
+**mDNS (`pi.local`)** — if it doesn't resolve from your Mac, use the Pi's IP directly. Find it with `ip addr` on the Pi or your router's DHCP table.
+
+**Switch auto-sleep** — drops the controller bond. Disable for long sessions: `System Settings → Sleep Mode → Auto-Sleep → Never`. The watchdog reconnects after wake, but the interruption is annoying mid-macro.
+
+**Don't mix daemon and old direct scripts** — only one nxbt process can hold the BT adapter. Always use `RemotePad` from Mac scripts. Never import `switch_control.pad.SwitchPad` directly while the daemon is running.
+
+---
+
+## Troubleshooting
+
+### `Address already in use` / `Operation not permitted` on PSM 17 or 19
+
+BlueZ `input` plugin is still loaded, or a zombie nxbt process is holding the ports.
+
+```bash
+# Kill zombies:
+sudo pkill -9 -f nxbt
+sudo pkill -9 -f 'bin/python.*nxbt'
+ps -ef | grep nxbt | grep -v grep     # must print nothing
+
+# Confirm plugin is disabled:
+systemctl cat bluetooth | grep ExecStart    # must show --noplugin=input
+```
+
+### `NotConnected` error from a Mac script
+
+```bash
+curl http://pi.local:8765/status    # check the 'state' field
+```
+
+| `state` | Fix |
+|---|---|
+| `reconnecting` | Wait 10–15s and retry. |
+| `crashed` | `curl -X POST http://pi.local:8765/reconnect` or `sudo systemctl restart switch-control` on the Pi. |
+| `unpaired` | Switch on Change Grip/Order → `pad.pair_fresh()`. |
+| daemon unreachable | `ssh pi "sudo systemctl status switch-control"` — daemon probably isn't running. |
+
+### Daemon won't start
+
+```bash
+sudo journalctl -u switch-control -n 50    # read the error
+rfkill list                                 # if BT is soft-blocked: sudo rfkill unblock bluetooth
+systemctl status bluetooth --no-pager
+```
+
+### Switch can't see the Pi (first-time pair)
+
+- Change Grip/Order times out after ~3 minutes — re-open it.
+- Move the Pi within 30cm of the Switch for the first pair — the Pi 4 antenna is weak.
+- Kill any zombie nxbt processes (see above).
+
+### Authentication Failure (0x05) repeating
+
+Stale link keys. Wipe both sides:
+
+```bash
+# Pi:
+sudo systemctl stop bluetooth
+sudo rm -rf /var/lib/bluetooth/*/[0-9A-F]*:*
+sudo systemctl start bluetooth
+
+# Switch: Controllers → Disconnect Controllers → hold L+R until confirmed
+```
+
+Then retry the first-time pair flow. If it still fails → `PI_CONTROLLER.md` §Authentication Failure for the full `a/b/c/d` remediation tree including the BlueZ agent workaround.
+
+### `pi.local` doesn't resolve
+
+```bash
+ssh pi "ip addr show wlan0 | grep 'inet '"    # get the Pi's IP
+export PI_HOST=<ip>
+```
+
+---
 
 ## File map
 
 ```
 nintendo/
-├── README.md                                this file
-├── PI_CONTROLLER.md                         Pi-side BT setup + troubleshooting
+├── README.md                        this file
+├── PI_CONTROLLER.md                 deep BT surgery: stale-state wipe, Auth Failure tree, btmon
 ├── switch_control/
-│   ├── __init__.py                          re-exports RemotePad, Buttons, Sticks
-│   ├── client.py                            HTTP client (Mac, stdlib only)
-│   ├── daemon.py                            HTTP server + watchdog (Pi only)
-│   └── pad.py                               nxbt wrapper (Pi only, used by daemon)
+│   ├── __init__.py                  re-exports RemotePad, Buttons, Sticks
+│   ├── client.py                    HTTP client (Mac, stdlib only)
+│   ├── daemon.py                    HTTP server + watchdog (Pi only)
+│   └── pad.py                       nxbt wrapper (Pi only, used by daemon)
 ├── scripts/
-│   ├── pi_daemon.py                         entry point: run on the Pi
-│   ├── interactive.py                       entry point: run on the Mac, REPL
-│   └── example_handoff.py                   entry point: run on the Mac, handoff demo
+│   ├── pi_daemon.py                 entry point: run on the Pi
+│   ├── interactive.py               entry point: run on the Mac, REPL
+│   ├── example_handoff.py           handoff demo
+│   └── botw_macros.py               15 BotW macros (town / combat / explore)
 └── systemd/
-    └── switch-control.service               optional autostart on the Pi
+    └── switch-control.service       optional autostart on the Pi
 ```
+
+---
 
 ## Quick reference
 
 | Action | Command |
 |---|---|
+| **Start session** | `ssh pi "sudo systemctl start switch-control"` then `python scripts/interactive.py` |
 | Start daemon (Pi, manual) | `sudo /home/yuvaltimen/nxbt/.venv/bin/python scripts/pi_daemon.py` |
-| Start daemon (Pi, systemd) | `sudo systemctl start switch-control` |
+| Restart daemon | `sudo systemctl restart switch-control` |
 | Daemon logs | `sudo journalctl -u switch-control -f` |
+| Sync repo to Pi | `rsync -av --delete --exclude='__pycache__' --exclude='.venv' --exclude='.git' /Users/yuvaltimen/Coding/nintendo/ pi:~/Coding/nintendo/` |
 | Mac REPL | `python scripts/interactive.py` |
-| Mac handoff demo | `python scripts/example_handoff.py` |
+| List BotW macros | `python scripts/botw_macros.py --list` |
+| Run a BotW macro | `python scripts/botw_macros.py <name>` |
 | Check connection | `curl http://pi.local:8765/status` |
 | Force reconnect | `curl -X POST http://pi.local:8765/reconnect` |
 | Force fresh pair | `curl -X POST http://pi.local:8765/pair` (Switch on Change Grip/Order) |
