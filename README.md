@@ -456,6 +456,484 @@ Press `Q` in the display window or `Ctrl-C` to stop. The Pi pad stays connected.
 
 ---
 
+## AI agent integration
+
+This section closes the full loop: `HDMI → YOLO → Claude → macros → Pi → Switch`. `scripts/agent_loop.py` replaces the hand-written `policy()` function in `vision_loop.py` with a live Claude call — the model sees the annotated game frame, reasons about what Link should do, and returns a macro string.
+
+### One-time setup
+
+```bash
+pip install anthropic
+
+# Add to ~/.zshrc so it persists across sessions:
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### Step 1: dry-run — watch Claude reason without moving Link
+
+Always start here. Claude will print its reasoning and the macro it *would* send, without touching the game. This lets you tune the goal wording and verify the prompt before anything moves.
+
+```bash
+CAPTURE_DEVICE=1 python scripts/agent_loop.py \
+  --goal "walk toward the nearest person and interact with them" \
+  --dry-run
+```
+
+You'll see output like:
+
+```
+[dry-run]  'L_STICK@+000+080 1.5s'
+           → I can see a person labeled at screen center-left. Moving forward to close distance.
+[wait]     Person is now close. Stopping to prepare interaction.
+[dry-run]  'A 0.1s'
+           → Person is within interaction range. Pressing A to start dialogue.
+```
+
+### Step 2: go live
+
+```bash
+CAPTURE_DEVICE=1 python scripts/agent_loop.py \
+  --goal "explore the area and interact with any NPCs"
+```
+
+The display window shows the clean game feed on the left and the YOLO-annotated feed on the right, with Claude's last reasoning line and the macro it sent overlaid. A green progress bar fills left-to-right counting down to the next LLM call.
+
+### Tuning the agent
+
+**Goal wording is the most important lever.** Be specific about what you want Link to do and what success looks like. Vague goals produce wandering behaviour.
+
+| Less effective | More effective |
+|---|---|
+| `"play the game"` | `"walk north along the road toward Kakariko Village"` |
+| `"fight"` | `"lock on to the nearest Bokoblin with ZL and attack with Y until it's gone"` |
+| `"explore"` | `"find and activate the shrine — it appears as a glowing blue pillar"` |
+
+**`--interval`** controls how often Claude is called. At 2s (default) the agent makes one decision every 2 seconds — fine for exploration and NPC interactions. Increase to 3–5s to reduce API spend during long runs.
+
+**`--claude-model`** — use `claude-haiku-4-5-20251001` while iterating on the prompt (cheapest, ~10ms latency). Switch to `claude-sonnet-4-5` for the final run quality.
+
+```bash
+# Fast + cheap during development:
+python scripts/agent_loop.py --goal "..." --claude-model claude-haiku-4-5-20251001 --interval 3.0
+
+# Full quality:
+python scripts/agent_loop.py --goal "..." --claude-model claude-sonnet-4-5 --interval 2.0
+```
+
+### What Claude sees
+
+Each call sends:
+
+1. **The YOLO-annotated frame** as a JPEG (base64). Claude sees bounding boxes, class labels, and confidence scores drawn over the game image.
+2. **Structured detection JSON** — label, confidence, and normalised screen position (cx/cy from 0 to 1) for each detected object.
+3. **Last 5 actions** the agent took, so Claude can detect loops or lack of progress.
+
+The response is a JSON object:
+
+```json
+{
+  "reasoning": "I can see a person labeled at center-left with 0.87 confidence. Moving forward to close distance.",
+  "macro": "L_STICK@+000+080 1.5s"
+}
+```
+
+An empty `macro` field means Claude decided to wait this tick.
+
+### Prompt caching
+
+The system prompt (controller reference + goal description) is sent with `cache_control: ephemeral`. At the default 2s call interval the cache stays warm — only the per-frame image and detections are billed at the full input token rate. On a 5-minute run this typically cuts token costs by 60–70%.
+
+### API cost reference
+
+| Model | Approx cost/call | 5-min run (~150 calls) |
+|---|---|---|
+| `claude-haiku-4-5-20251001` | ~$0.001 | ~$0.15 |
+| `claude-sonnet-4-5` | ~$0.008 | ~$1.20 |
+
+---
+
+## Local model agent (phi4 via Ollama)
+
+`scripts/phi4_agent.py` runs phi4 **locally via Ollama** — no API key, no cost per call, fully private. The trade-off vs. `agent_loop.py` (Claude) is speed: phi4 takes 3–8 s per response on Apple Silicon vs. ~1 s for Claude Sonnet.
+
+### Architecture
+
+The script runs two concurrent pieces:
+
+```
+Main thread   capture card → YOLO inference → OpenCV display window (always live)
+REPL thread   BotW Agent > prompt → phi4 streaming calls → pad.macro()
+```
+
+The display window stays open and updates continuously regardless of whether a goal is running or the prompt is waiting for input. `cv2.imshow` must run on the main thread on macOS (Cocoa requirement) — this design ensures that.
+
+Cancellation uses a `threading.Event` (`stop_goal`) rather than `KeyboardInterrupt`. When you press Ctrl-C or Q in the window, a signal handler sets `stop_goal`, which `call_phi4()` checks between every streamed token (~50 ms response time). `pad.stop()` fires at the same moment.
+
+### One-time setup
+
+```bash
+# Pull the model (~9 GB, once):
+ollama pull phi4
+
+# Verify:
+ollama list    # phi4 should appear
+```
+
+No additional `pip install` — uses stdlib `urllib` for Ollama calls. OpenCV and ultralytics are already installed.
+
+### Connecting and starting
+
+```bash
+CAPTURE_DEVICE=1 python scripts/phi4_agent.py
+```
+
+Startup runs four pre-flight checks in order and tells you exactly what to fix if any step fails:
+
+```
+Checking Ollama (phi4)...          phi4 is ready
+Connecting to Pi daemon (pi.local)... connected.
+Loading YOLO (yolov8n.pt)...       ready.
+Opening capture device 1...        1280x720.
+```
+
+Then the REPL prompt opens in the terminal and the display window opens simultaneously.
+
+### The display window
+
+The window shows two panels side by side, scaled to fit your screen (`--scale 0.65` by default):
+
+```
+┌─────────────────────────┬─────────────────────────┐
+│  Clean game feed        │  YOLO annotations        │
+│                         │                          │
+│  IDLE / RUNNING /       │  fps  |  phi4            │
+│  THINKING badge         │  [thinking... if active] │
+│  (top-left corner)      │                          │
+│                         │  goal text (yellow)      │
+│                         │  last reasoning (gray)   │
+│                         │  last cmd: ... (blue)    │
+└─────────────────────────┴─────────────────────────┘
+                          ▓▓▓▓▓▓░░░░  ← cooldown bar
+```
+
+The **green cooldown bar** at the bottom edge fills left-to-right and resets each time phi4 is called. When it's full, a new phi4 call fires.
+
+The badge on the left panel tells you what's happening:
+- `IDLE` (gray) — waiting at the prompt, no goal active
+- `RUNNING` (green) — goal active, waiting for the next phi4 call
+- `THINKING` (yellow) — phi4 is generating a response right now
+
+### Using the REPL
+
+Type goals in the terminal. The display window updates live while you type.
+
+```
+BotW Agent > walk toward the nearest NPC and talk to them
+[running] walk toward the nearest NPC and talk to them
+
+  [sent]   'L_STICK@+000+070 2.0s'
+           → person detected at center-left (82% conf). Moving forward.
+  [wait]   Person now in close range — pausing to position.
+  [sent]   'A 0.1s'
+           → within interaction distance, pressing A.
+^C
+[stopping — halting Pi pad] done.
+[stopped]
+
+BotW Agent > status
+  {'state': 'connected', 'connected': True, 'reconnect_count': 1, ...}
+
+BotW Agent > defeat the enemy on the right side of the screen
+[running] defeat the enemy on the right side of the screen
+  ...
+
+BotW Agent > quit
+```
+
+Built-in commands:
+
+| Input | Effect |
+|---|---|
+| `<any text>` | Start agent with that goal |
+| `status` | Print Pi pad connection state |
+| `quit` or `exit` | Stop and close everything |
+| Ctrl-C | Cancel current run, return to prompt |
+| Q (display window) | Cancel current run if one is running; exit if idle |
+
+### How cancellation works
+
+Pressing Ctrl-C fires Python's `SIGINT` handler in the main thread. The handler:
+
+1. Checks `state.has_active_goal()` — if a goal is running, sets `state.stop_goal`.
+2. Calls `pad.stop()` → `POST /stop` to the Pi daemon → any running macro halts immediately.
+3. Prints `[stopped]` and returns to the `BotW Agent >` prompt.
+
+If no goal is running, Ctrl-C instead sets `state.exit_app` and closes the script.
+
+`call_phi4()` checks `stop_goal` between every streamed token from Ollama. phi4 streams one token every ~30–80 ms, so cancellation fires within one token interval — it does not wait for the full response.
+
+Q in the display window follows the same path via the `cv2.waitKey` check in `display_loop`.
+
+### Tuning
+
+**Calibrate `--interval` to your machine first.** If `interval` is shorter than phi4's actual response time, the stop_goal event fires before the response arrives and the agent never sends anything.
+
+```bash
+# Time a minimal phi4 response:
+time ollama run phi4 "Reply with the single word: ready"
+
+# Set interval ~1-2 s above that:
+CAPTURE_DEVICE=1 python scripts/phi4_agent.py --interval 7.0
+```
+
+On M1/M2 Pro, phi4 takes roughly 4–6 s for a 100-token response. 7–8 s is a safe interval. On M3 Max or faster, 4–5 s may work.
+
+**Goal wording is the most impactful lever.** phi4 acts on the scene description it receives — be specific about what you want Link to do and what success looks like:
+
+| Less effective | More effective |
+|---|---|
+| `"fight"` | `"lock on to the enemy at screen-right with ZL and attack with Y"` |
+| `"explore"` | `"walk forward along the dirt road and stop at any building"` |
+| `"find shrine"` | `"scan left and right with the camera looking for a glowing blue pillar"` |
+
+**`--scale`** adjusts the display window size. Default 0.65 fits a 13" MacBook screen. Increase to 1.0 on an external monitor:
+
+```bash
+python scripts/phi4_agent.py --scale 1.0
+```
+
+**`--yolo-model`** — swap to `models/botw.pt` once trained. phi4 reasons dramatically better with BotW-specific class names:
+
+```bash
+python scripts/phi4_agent.py --yolo-model models/botw.pt --interval 6.0
+```
+
+### Debugging
+
+**`Checking Ollama... FAIL` on startup**
+
+Ollama isn't running. Open the Ollama app, or:
+```bash
+ollama serve       # starts the Ollama server in foreground
+```
+If it says the model isn't found, `ollama pull phi4` and retry.
+
+**Agent runs but never sends `[sent]` — only `[wait]`**
+
+phi4 is returning an empty macro string every turn. Likely causes:
+1. The goal is too vague — try a more specific goal.
+2. YOLO detects nothing useful — watch the right panel. If no boxes appear for the object you're describing, phi4 has nothing to reason about.
+3. phi4 is misunderstanding the scene description — run a manual test:
+
+```bash
+ollama run phi4
+>>> You are controlling Link in Breath of the Wild. Detected objects: - person (87%) at screen center/middle. Goal: walk toward the person. Respond with JSON only: {"reasoning": "...", "macro": "..."}
+```
+
+If phi4 gives a good answer here but not in the agent, the issue is prompt formatting — add `print(messages[-1]["content"])` inside `goal_loop` temporarily to inspect what the agent is actually sending.
+
+**`[parse error]` appearing repeatedly**
+
+phi4 is not returning valid JSON. This happens when the model adds markdown fences (` ```json `) or extra explanation text. The `parse_response` function strips common wrappers, but sometimes phi4 ignores the format instruction.
+
+Try adding a stronger format reminder to the user message in `goal_loop`:
+```python
+"content": (
+    f"Goal: {goal}\n\n{scene}\n\n"
+    f"Recent actions:\n{history_str}\n\n"
+    "Respond with ONLY the JSON object, no other text:\n"   # ← add this
+    "What should Link do next?"
+),
+```
+
+**phi4 responses are very slow (> 10 s)**
+
+Check whether another process is using Ollama simultaneously:
+```bash
+ollama ps    # shows currently loaded models and GPU/CPU usage
+```
+
+If phi4 is running on CPU (no Metal), it'll be much slower. Confirm Metal is being used:
+```bash
+ollama run phi4 "hi" 2>&1 | grep -i metal
+# Should show Metal being used. If not, reinstall Ollama.
+```
+
+**Display window is black or frozen**
+
+OpenCV's AVFoundation backend on macOS sometimes needs a frame to be read before `imshow` initialises. This usually self-clears after 2–3 seconds. If it persists:
+```bash
+python scripts/vision_loop.py --scan      # verify capture device is readable
+python scripts/vision_loop.py --device 1  # test standalone display before running agent
+```
+
+**Pad receives commands but the Switch doesn't respond**
+
+```bash
+# In a separate terminal or the status command:
+curl http://raspberrypi.local:8765/status
+```
+
+If `state` is `reconnecting`, wait 10 s. If `crashed`, restart the daemon:
+```bash
+ssh pi "sudo systemctl restart switch-control"
+```
+
+**The agent loops on the same action**
+
+phi4 will repeat a macro if the scene description doesn't change between calls (YOLO sees the same objects in the same positions). The system prompt instructs phi4 not to repeat the same macro more than 3 times, but this isn't always respected. If it's stuck:
+1. Increase `--interval` so the scene has more time to change between calls.
+2. Add more variety to the goal: `"explore, and if you've been doing the same thing for 3 turns, try something different"`.
+3. Look at the YOLO panel — if it's detecting the same `person` at the same position every frame, the character may be stuck against geometry and needs a different movement direction.
+
+### phi4 vs. Claude — when to use each
+
+| | `phi4_agent.py` | `agent_loop.py` (Claude) |
+|---|---|---|
+| Cost | Free | ~$0.001–$0.01/call |
+| Latency | 3–8 s (local, M-series) | ~1 s (API) |
+| Privacy | Fully local | Frames sent to Anthropic |
+| Input | Text scene description | Annotated JPEG + JSON |
+| Quality | Good for YOLO-driven goals | Better for visual reasoning |
+| Best for | Long runs, iteration, cost-free testing | Best-quality final runs |
+
+phi4 works well when the goal maps directly onto what YOLO detects — "move toward the person", "attack the enemy at screen-right". Claude's vision advantage matters when the game state can't be captured by bounding boxes alone: reading on-screen text, understanding terrain shape, or reacting to HUD states that YOLO doesn't label.
+
+---
+
+## Training a custom YOLO model
+
+The default `yolov8n.pt` is trained on COCO — it knows "person", "car", "dog". It does not know "Bokoblin", "heart container", or "shrine". A BotW-specific model is what turns rough detection into useful control signal.
+
+### Recommended starter classes
+
+Don't try to label everything at once. Pick the classes that will actually drive decisions in your control policy:
+
+| Category | Classes |
+|---|---|
+| Enemies | `bokoblin`, `blue_bokoblin`, `silver_bokoblin`, `lizalfos`, `moblin`, `guardian` |
+| HUD | `heart_full`, `heart_half`, `heart_empty`, `stamina_wheel` |
+| Environment | `shrine`, `treasure_chest`, `cooking_pot`, `npc` |
+| Items | `weapon_on_ground`, `rupee` |
+
+Start with 3–5 enemy types and the HUD elements. Those alone unlock enemy-detection logic and health-aware behaviour.
+
+### Data pipeline — two sources
+
+#### Source 1: Hyrule Compendium API
+
+The Hyrule Compendium is a public REST API that exposes every BotW enemy, item, and equipment entry with a reference photo. Search for "Hyrule Compendium API" on GitHub — the main project by gadhagod is the canonical one. It returns JSON with image URLs for all ~400 entries.
+
+Write a small script to download and organise them:
+
+```python
+# Rough outline — fill in the actual API URL from the GitHub project
+import requests, pathlib, time
+
+BASE = "https://<compendium-api-host>/api/v3"
+categories = ["monsters", "equipment", "materials", "treasure", "creatures"]
+
+for cat in categories:
+    entries = requests.get(f"{BASE}/category/{cat}").json()["data"]
+    for entry in entries:
+        name  = entry["name"].replace(" ", "_")
+        image = entry.get("image")
+        if not image:
+            continue
+        out = pathlib.Path(f"data/compendium/{cat}/{name}.jpg")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(requests.get(image).content)
+        time.sleep(0.1)   # be polite to the API
+```
+
+Compendium images are clean reference shots — good for bootstrapping label definitions, but they show enemies in isolation against plain backgrounds. In-game screenshots transfer much better.
+
+#### Source 2: Self-captured gameplay frames
+
+`scripts/collect_frames.py` captures live gameplay frames from your capture card.
+
+```bash
+# Start the capture card feed first, then:
+CAPTURE_DEVICE=1 python scripts/collect_frames.py --output data/raw --every 30
+```
+
+Play BotW normally for 20–30 minutes. Deliberately visit:
+- Hyrule Field (open combat, Bokoblins, Guardians)
+- Kakariko Village (NPCs, cooking pot, shrine)
+- A forest or cliff area (climbing, paragliding)
+- A dungeon or shrine interior (different lighting)
+
+At `--every 30` (~1fps) a 20-minute session produces ~1,200 frames. You won't annotate all of them — Roboflow lets you filter to frames that actually contain interesting objects.
+
+```
+data/
+├── raw/           ← self-captured gameplay frames (unannotated)
+└── compendium/    ← reference images per entity from the API
+```
+
+### Annotating with Roboflow
+
+[Roboflow](https://roboflow.com) is the fastest path from raw images to a trained-ready dataset. Free tier: 1,000 images, unlimited projects.
+
+1. Create a project → Object Detection → class names from your starter list above.
+2. Upload `data/raw/` (drag the folder in).
+3. Draw bounding boxes around each instance. Roboflow has auto-label assistance that speeds this up significantly once you have ~20 examples per class.
+4. Let Roboflow generate the train/val/test split (80/10/10 default is fine).
+5. **Export → YOLOv8** → Download ZIP. It contains `dataset.yaml` and the split directories.
+
+Aim for **100–200 annotated instances per class** before the first training run. You can always add more later.
+
+### Training
+
+```bash
+pip install ultralytics   # if not already installed
+
+# CPU / Intel Mac:
+yolo train data=path/to/dataset.yaml model=yolov8n.pt epochs=50 imgsz=640
+
+# Apple Silicon (uses Metal):
+yolo train data=path/to/dataset.yaml model=yolov8n.pt epochs=50 imgsz=640 device=mps
+```
+
+Training logs go to `runs/detect/train/`. Watch `mAP50` in the output — above 0.5 is usable, above 0.7 is solid for this task. Training takes ~10–30 minutes on Apple Silicon for a small dataset.
+
+Copy the best checkpoint somewhere stable:
+
+```bash
+mkdir -p models
+cp runs/detect/train/weights/best.pt models/botw.pt
+```
+
+### Validate visually before using it
+
+```bash
+# See what the model actually detects on your live feed:
+CAPTURE_DEVICE=1 python scripts/vision_loop.py --model models/botw.pt --dry-run
+```
+
+Watch the annotated window. If boxes are consistently wrong or missing, you need more annotated data for those classes or more training epochs. Add images → re-annotate → re-export → retrain is a fast cycle (each training run takes ~15 minutes).
+
+### Run the full loop with the custom model
+
+```bash
+# vision_loop (rule-based policy):
+CAPTURE_DEVICE=1 python scripts/vision_loop.py --model models/botw.pt
+
+# agent_loop (LLM policy):
+CAPTURE_DEVICE=1 python scripts/agent_loop.py \
+  --yolo-model models/botw.pt \
+  --goal "find and defeat the nearest Bokoblin"
+```
+
+### Iteration tips
+
+- **More data beats more epochs.** If validation mAP plateaus, add images — don't just increase epochs.
+- **Hard negatives matter.** If the model confuses a torch with a shrine, add 20–30 annotated torch examples explicitly labeled as a different class (or background).
+- **Keep the model small.** `yolov8n` (nano) runs at ~60fps on Apple Silicon. `yolov8s` (small) gives better accuracy at ~40fps — still plenty for a 2s agent interval. Don't go larger unless you have a GPU.
+- **Label what the camera sees, not the compendium.** Enemies look different from behind, at night, or in rain. Diverse capture conditions matter more than total frame count.
+
+---
+
 ## Pairing and recovery
 
 ### First-ever pair
@@ -600,7 +1078,15 @@ nintendo/
 │   ├── interactive.py               entry point: run on the Mac, REPL
 │   ├── example_handoff.py           handoff demo
 │   ├── botw_macros.py               15 BotW macros (town / combat / explore)
-│   └── vision_loop.py               HDMI capture → YOLO → control loop
+│   ├── vision_loop.py               HDMI capture → YOLO → rule-based control
+│   ├── agent_loop.py                HDMI capture → YOLO → Claude → macros
+│   ├── phi4_agent.py                HDMI capture → YOLO → phi4 (Ollama) → macros, interactive REPL
+│   └── collect_frames.py            capture gameplay frames for YOLO training
+├── models/
+│   └── botw.pt                      custom BotW YOLO model (after training)
+├── data/
+│   ├── raw/                         self-captured gameplay frames (unannotated)
+│   └── compendium/                  reference images from the Hyrule Compendium API
 └── systemd/
     └── switch-control.service       optional autostart on the Pi
 ```
@@ -622,6 +1108,13 @@ nintendo/
 | Scan capture devices | `python scripts/vision_loop.py --scan` |
 | Vision loop (dry-run) | `python scripts/vision_loop.py --device 1 --dry-run` |
 | Vision loop (live) | `CAPTURE_DEVICE=1 python scripts/vision_loop.py` |
+| Agent loop (dry-run) | `python scripts/agent_loop.py --goal "..." --dry-run` |
+| Agent loop (live) | `CAPTURE_DEVICE=1 python scripts/agent_loop.py --goal "..."` |
+| **phi4 agent (REPL)** | `CAPTURE_DEVICE=1 python scripts/phi4_agent.py` |
+| phi4 with custom model | `python scripts/phi4_agent.py --yolo-model models/botw.pt` |
+| Capture training frames | `CAPTURE_DEVICE=1 python scripts/collect_frames.py --output data/raw` |
+| Train YOLO model | `yolo train data=dataset.yaml model=yolov8n.pt epochs=50 imgsz=640 device=mps` |
+| Agent with custom model | `python scripts/agent_loop.py --yolo-model models/botw.pt --goal "..."` |
 | Check connection | `curl http://raspberrypi.local:8765/status` |
 | Force reconnect | `curl -X POST http://raspberrypi.local:8765/reconnect` |
 | Force fresh pair | `curl -X POST http://raspberrypi.local:8765/pair` (Switch on Change Grip/Order) |
