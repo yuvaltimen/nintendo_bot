@@ -75,7 +75,7 @@ Nintendo Switch Pro Controller — macro string syntax:
              Diagonals OK: L_STICK@+070+070  (values -100 to +100)
   Camera     R_STICK@+100+000 (pan right)  R_STICK@-100+000 (pan left)
              R_STICK@+000-100 (look up)    R_STICK@+000+100 (look down)
-  Actions    A (interact/climb)  B (jump)  Y (attack)  X (paraglider mid-air)
+  Actions    A (interact)  X (jump, activate paraglider mid-air, perform a jump climb) Y (attack) B (hold to run, cancel paraglider mid-air)
   Triggers   ZL (raise shield/lock-on hold)  ZR (draw bow/aim hold)
   Other      PLUS (map)  MINUS (whistle)  DPAD_UP/DOWN/LEFT/RIGHT
   Combos     ZL + L_STICK@+000-100 + B  →  backflip dodge
