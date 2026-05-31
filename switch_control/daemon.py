@@ -69,7 +69,7 @@ class Daemon:
     def start_bt_agent(self):
         """Spawn bluetoothctl with the NoInputNoOutput pairing agent.
 
-        Required workaround for newer BlueZ vs nxbt — see PI_CONTROLLER.md §5.7d.
+        Required workaround for newer BlueZ vs nxbt - see PI_CONTROLLER.md §5.7d.
         """
         proc = subprocess.Popen(
             ["bluetoothctl"],
@@ -181,7 +181,7 @@ class Daemon:
 
         nxbt's mainloop has its own save_connection() that recovers from BT drops
         by re-establishing the L2CAP sockets. Racing it caused the dbus NoReply
-        crashes we saw — so we let it do its thing and only step in if state ends
+        crashes we saw - so we let it do its thing and only step in if state ends
         up at 'crashed' (the unambiguous nxbt-gave-up signal).
         """
         while not self._stop.is_set():
@@ -189,7 +189,7 @@ class Daemon:
             self.last_heartbeat_ok = self._bluez_link_up()
             state = self._state_str()
             if state == "crashed":
-                log.warning("nxbt state=crashed — triggering recovery reconnect")
+                log.warning("nxbt state=crashed - triggering recovery reconnect")
                 self._pair(fresh=False)
                 time.sleep(RECONNECT_BACKOFF_S)
 

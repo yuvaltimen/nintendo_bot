@@ -1,4 +1,4 @@
-"""HTTP client for the Pi-side daemon. Stdlib only — runs on Mac or Pi."""
+"""HTTP client for the Pi-side daemon. Stdlib only - runs on Mac or Pi."""
 
 import json
 import time
@@ -98,11 +98,11 @@ class RemotePad:
                 pass
             time.sleep(poll)
         hint = {
-            "connecting": " — Switch is likely on Change Grip/Order; press A on a paired joycon to dismiss it",
-            "reconnecting": " — nxbt is reconnecting; usually resolves in ~10s",
-            "crashed": " — try pad.reconnect()",
-            "unpaired": " — no Switch ever paired; put Switch on Change Grip/Order and call pad.pair_fresh()",
-            "unreachable": " — could not reach the daemon at all; is it running?",
+            "connecting": " - Switch is likely on Change Grip/Order; press A on a paired joycon to dismiss it",
+            "reconnecting": " - nxbt is reconnecting; usually resolves in ~10s",
+            "crashed": " - try pad.reconnect()",
+            "unpaired": " - no Switch ever paired; put Switch on Change Grip/Order and call pad.pair_fresh()",
+            "unreachable": " - could not reach the daemon at all; is it running?",
         }.get(last_state, "")
         raise TimeoutError(
             f"daemon did not become connected within {timeout}s (state={last_state}){hint}"

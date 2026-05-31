@@ -2,7 +2,7 @@
 
 A Mac-driven command-and-control system for a Nintendo Switch. The Raspberry Pi runs a long-lived daemon that holds a virtual Pro Controller's Bluetooth connection and exposes an HTTP API; your Mac sends commands to it.
 
-The end goal: plug an HDMI capture card into the Mac, run YOLO + LLM on the captured frames, and have the LLM call the same HTTP API to play prompted scenarios. The architecture scales into that shape — the LLM is just another client of the daemon.
+The end goal: plug an HDMI capture card into the Mac, run YOLO + LLM on the captured frames, and have the LLM call the same HTTP API to play prompted scenarios. The architecture scales into that shape - the LLM is just another client of the daemon.
 
 ---
 
@@ -41,7 +41,7 @@ Pi already set up and paired at least once? This is all you need:
 # 1. Start (or confirm) the daemon on the Pi
 ssh pi "sudo systemctl start switch-control"
 
-# 2. Wake the Switch — press any button on your joycons
+# 2. Wake the Switch - press any button on your joycons
 
 # 3. Open the interactive REPL on your Mac
 python scripts/interactive.py
@@ -51,7 +51,7 @@ python scripts/botw_macros.py --list
 python scripts/botw_macros.py casual_stroll
 ```
 
-The daemon reconnects to the Switch within ~10 seconds of it waking. If `systemctl start` says the unit is already running, that's fine — it's a no-op.
+The daemon reconnects to the Switch within ~10 seconds of it waking. If `systemctl start` says the unit is already running, that's fine - it's a no-op.
 
 > **Something broken?** → [Troubleshooting](#troubleshooting) below, or the deep BT diagnosis tree in `PI_CONTROLLER.md`.
 
@@ -71,7 +71,7 @@ Nintendo Switch (docked)
                                          (same pad API for both)
 ```
 
-The daemon keeps the BT pad connected across many script runs. It heartbeats every 5 seconds and auto-reconnects on drop. Mac scripts are stateless clients — start, send commands, exit; the BT link survives.
+The daemon keeps the BT pad connected across many script runs. It heartbeats every 5 seconds and auto-reconnects on drop. Mac scripts are stateless clients - start, send commands, exit; the BT link survives.
 
 ---
 
@@ -151,7 +151,7 @@ rsync -av --delete --exclude='__pycache__' --exclude='.venv' --exclude='.git' \
   /Users/yuvaltimen/Coding/nintendo/ pi:~/Coding/nintendo/
 ```
 
-Re-run this any time you change daemon code (`switch_control/daemon.py` or `switch_control/pad.py`). Script-only changes don't need a re-sync — they run on the Mac.
+Re-run this any time you change daemon code (`switch_control/daemon.py` or `switch_control/pad.py`). Script-only changes don't need a re-sync - they run on the Mac.
 
 ### 6. First-time pair
 
@@ -162,7 +162,7 @@ ssh pi
 sudo PYTHONUNBUFFERED=1 /home/yuvaltimen/nxbt/.venv/bin/python ~/Coding/nintendo/scripts/pi_daemon.py
 ```
 
-Watch for `[INFO] daemon: connected`. The Switch shows a new Pro Controller on the Change Grip/Order screen. After the first successful pair the Switch remembers the Pi's MAC forever — reconnects are automatic from here on.
+Watch for `[INFO] daemon: connected`. The Switch shows a new Pro Controller on the Change Grip/Order screen. After the first successful pair the Switch remembers the Pi's MAC forever - reconnects are automatic from here on.
 
 > **Pairing fails?** → `PI_CONTROLLER.md` §Wipe stale state + §Authentication Failure for the full diagnosis tree.
 
@@ -175,7 +175,7 @@ sudo systemctl enable --now switch-control
 sudo journalctl -u switch-control -f      # confirm it started
 ```
 
-With this, powering on the Pi is enough — the daemon starts, reconnects to the Switch, and the API is live on port 8765.
+With this, powering on the Pi is enough - the daemon starts, reconnects to the Switch, and the API is live on port 8765.
 
 ---
 
@@ -204,7 +204,7 @@ A daemon code change still requires a sync + `sudo systemctl restart switch-cont
 
 ## Two ways to drive
 
-### Mode 1: Interactive REPL — for exploring
+### Mode 1: Interactive REPL - for exploring
 
 ```bash
 python scripts/interactive.py
@@ -223,7 +223,7 @@ Drops you into a Python REPL on your Mac with `pad`, `Buttons`, `Sticks` pre-bou
 
 Ctrl-D to exit. The pad stays connected on the Pi.
 
-### Mode 2: Handoff scripts — for replaying
+### Mode 2: Handoff scripts - for replaying
 
 ```bash
 python scripts/example_handoff.py
@@ -255,7 +255,7 @@ Macros are the primary input language. Everything on one line fires simultaneous
 pad.macro("L_STICK@+100+000 A 1.0s")    # stick right + A together for 1 second
 ```
 
-Hold a stick across multiple presses — restate it on every line:
+Hold a stick across multiple presses - restate it on every line:
 
 ```python
 pad.macro("""
@@ -324,8 +324,8 @@ This section is the end-to-end walkthrough for getting `scripts/vision_loop.py` 
 
 | Item | Notes |
 |---|---|
-| **Passive HDMI splitter** (1-in, 2-out) | ~$10–15 on Amazon. Passive splitters work — the Switch doesn't use HDCP. |
-| **USB HDMI capture card** (UVC-compliant) | ~$15–25 generic ("HDMI USB capture card UVC"), or Elgato Cam Link 4K (~$100) for reliability. Avoid the Elgato HD60 — it requires proprietary software. |
+| **Passive HDMI splitter** (1-in, 2-out) | ~$10–15 on Amazon. Passive splitters work - the Switch doesn't use HDCP. |
+| **USB HDMI capture card** (UVC-compliant) | ~$15–25 generic ("HDMI USB capture card UVC"), or Elgato Cam Link 4K (~$100) for reliability. Avoid the Elgato HD60 - it requires proprietary software. |
 
 The Switch outputs HDMI **only when docked**. Handheld mode has no video out.
 
@@ -345,7 +345,7 @@ Switch dock
 pip install opencv-python ultralytics
 ```
 
-`ultralytics` automatically uses Apple Silicon's Metal (MPS) GPU backend — no extra configuration needed.
+`ultralytics` automatically uses Apple Silicon's Metal (MPS) GPU backend - no extra configuration needed.
 
 ### Step 1: Find the capture card's device index
 
@@ -366,7 +366,7 @@ The index changes if you plug into a different USB port or change the port order
 
 ### Step 2: Verify the feed before enabling control
 
-Run with `--dry-run` — this opens the display window, runs YOLO inference, and prints what commands *would* be sent, but never touches the Switch:
+Run with `--dry-run` - this opens the display window, runs YOLO inference, and prints what commands *would* be sent, but never touches the Switch:
 
 ```bash
 python scripts/vision_loop.py --device 1 --dry-run
@@ -383,11 +383,11 @@ export CAPTURE_DEVICE=1
 
 ### Step 3: Choose a display mode
 
-Three modes — pick based on your setup:
+Three modes - pick based on your setup:
 
 | Flag | Window shown | When to use |
 |---|---|---|
-| *(none, default)* | Side-by-side: clean left, YOLO annotations right | Tuning the policy — see the raw game and what the model detects at the same time |
+| *(none, default)* | Side-by-side: clean left, YOLO annotations right | Tuning the policy - see the raw game and what the model detects at the same time |
 | `--clean` | Clean frame only, last command shown at bottom | Capture card is your only monitor; want a full view without annotation clutter |
 | `--no-display` | None | TV/monitor on the splitter is your display; run the script headless |
 
@@ -414,9 +414,9 @@ def policy(frame, results, w: int, h: int) -> str | None:
     return None
 ```
 
-The macro string uses the same DSL as `pad.macro()` — see [Macro DSL](#macro-dsl). The `--cooldown` flag (default 0.5s) gates how often `policy()` can fire a command.
+The macro string uses the same DSL as `pad.macro()` - see [Macro DSL](#macro-dsl). The `--cooldown` flag (default 0.5s) gates how often `policy()` can fire a command.
 
-The default YOLO model (`yolov8n.pt`) is trained on COCO classes (person, car, dog, etc.) — useful for structural testing but not BotW-specific. Swap in a fine-tuned model via `--model path/to/model.pt` or `$YOLO_MODEL` once you have one.
+The default YOLO model (`yolov8n.pt`) is trained on COCO classes (person, car, dog, etc.) - useful for structural testing but not BotW-specific. Swap in a fine-tuned model via `--model path/to/model.pt` or `$YOLO_MODEL` once you have one.
 
 ### Step 5: Run live
 
@@ -427,7 +427,7 @@ python scripts/vision_loop.py --no-display
 # Capture card is your only monitor, clean view:
 python scripts/vision_loop.py --clean
 
-# Tuning mode — side-by-side clean + annotated:
+# Tuning mode - side-by-side clean + annotated:
 python scripts/vision_loop.py
 ```
 
@@ -442,17 +442,17 @@ Press `Q` in the display window or `Ctrl-C` to stop. The Pi pad stays connected.
 | HTTP to Pi + Bluetooth to Switch | ~30–50ms |
 | **Total round-trip** | **~50–100ms** |
 
-50–100ms is fine for strategic decisions (navigate toward a target, attack when an enemy is centred, interact with an object). It is **not** tight enough for frame-perfect inputs like parry timing — use scripted macros from `botw_macros.py` for those.
+50–100ms is fine for strategic decisions (navigate toward a target, attack when an enemy is centred, interact with an object). It is **not** tight enough for frame-perfect inputs like parry timing - use scripted macros from `botw_macros.py` for those.
 
 ### Troubleshooting capture
 
-**`Cannot open capture device 1`** — re-run `--scan`, the index may have shifted. Also try passing `--device 0` explicitly.
+**`Cannot open capture device 1`** - re-run `--scan`, the index may have shifted. Also try passing `--device 0` explicitly.
 
-**Image is upside-down or mirrored** — add a `cv2.flip(frame, 1)` at the top of `policy()`, or flip before inference in `run_loop`.
+**Image is upside-down or mirrored** - add a `cv2.flip(frame, 1)` at the top of `policy()`, or flip before inference in `run_loop`.
 
-**YOLO is slow / dropping frames** — switch to `yolov8n.pt` (nano) if not already using it, or lower the capture resolution: edit `FRAME_W`/`FRAME_H` at the top of `vision_loop.py`.
+**YOLO is slow / dropping frames** - switch to `yolov8n.pt` (nano) if not already using it, or lower the capture resolution: edit `FRAME_W`/`FRAME_H` at the top of `vision_loop.py`.
 
-**Commands firing too rapidly** — increase `--cooldown` (default 0.5s). For exploration loops, 1–2s is more appropriate.
+**Commands firing too rapidly** - increase `--cooldown` (default 0.5s). For exploration loops, 1–2s is more appropriate.
 
 ---
 
@@ -461,12 +461,12 @@ Press `Q` in the display window or `Ctrl-C` to stop. The Pi pad stays connected.
 ### First-ever pair
 
 Switch must be on `Controllers → Change Grip/Order`. Then either:
-- Start the daemon — it tries to pair on startup, or
+- Start the daemon - it tries to pair on startup, or
 - If the daemon is already running: `pad.pair_fresh()` from the REPL.
 
 ### Every subsequent connection
 
-Just run a Mac script. The Pi daemon has the Switch's MAC bonded. If the Pi rebooted, the daemon reconnects on startup. If the Switch was off, wake it — the watchdog reconnects within ~10 seconds.
+Just run a Mac script. The Pi daemon has the Switch's MAC bonded. If the Pi rebooted, the daemon reconnects on startup. If the Switch was off, wake it - the watchdog reconnects within ~10 seconds.
 
 ### Auto-reconnect
 
@@ -501,19 +501,19 @@ pad.wait_connected()
 
 ## Known gotchas
 
-**Daemon needs sudo** — nxbt needs raw HCI access. The systemd unit runs as root; the manual command uses `sudo`. No way around this.
+**Daemon needs sudo** - nxbt needs raw HCI access. The systemd unit runs as root; the manual command uses `sudo`. No way around this.
 
-**bluetoothctl D-Bus agent** — the daemon spawns it automatically at startup. If you ever see `Authentication Failure (0x05)` running nxbt outside the daemon, this is why. The daemon handles it transparently.
+**bluetoothctl D-Bus agent** - the daemon spawns it automatically at startup. If you ever see `Authentication Failure (0x05)` running nxbt outside the daemon, this is why. The daemon handles it transparently.
 
-**Wi-Fi/BT antenna sharing on Pi 4** — the onboard radios share an antenna. Under heavy BT traffic, Wi-Fi load can cause reconnects. Fix: use Ethernet and `sudo rfkill block wifi`, or use a USB Bluetooth dongle.
+**Wi-Fi/BT antenna sharing on Pi 4** - the onboard radios share an antenna. Under heavy BT traffic, Wi-Fi load can cause reconnects. Fix: use Ethernet and `sudo rfkill block wifi`, or use a USB Bluetooth dongle.
 
-**Long macros and reconnects** — if BT drops mid-macro, the endpoint returns `NotConnected` and the macro is lost. After the watchdog reconnects, re-issue it. Break long sequences into chunks wrapped in `pad.run_resilient`.
+**Long macros and reconnects** - if BT drops mid-macro, the endpoint returns `NotConnected` and the macro is lost. After the watchdog reconnects, re-issue it. Break long sequences into chunks wrapped in `pad.run_resilient`.
 
-**mDNS (`raspberrypi.local`)** — if it doesn't resolve from your Mac, use the Pi's IP directly. Find it with `ip addr` on the Pi or your router's DHCP table.
+**mDNS (`raspberrypi.local`)** - if it doesn't resolve from your Mac, use the Pi's IP directly. Find it with `ip addr` on the Pi or your router's DHCP table.
 
-**Switch auto-sleep** — drops the controller bond. Disable for long sessions: `System Settings → Sleep Mode → Auto-Sleep → Never`. The watchdog reconnects after wake, but the interruption is annoying mid-macro.
+**Switch auto-sleep** - drops the controller bond. Disable for long sessions: `System Settings → Sleep Mode → Auto-Sleep → Never`. The watchdog reconnects after wake, but the interruption is annoying mid-macro.
 
-**Don't mix daemon and old direct scripts** — only one nxbt process can hold the BT adapter. Always use `RemotePad` from Mac scripts. Never import `switch_control.pad.SwitchPad` directly while the daemon is running.
+**Don't mix daemon and old direct scripts** - only one nxbt process can hold the BT adapter. Always use `RemotePad` from Mac scripts. Never import `switch_control.pad.SwitchPad` directly while the daemon is running.
 
 ---
 
@@ -544,7 +544,7 @@ curl http://raspberrypi.local:8765/status    # check the 'state' field
 | `reconnecting` | Wait 10–15s and retry. |
 | `crashed` | `curl -X POST http://raspberrypi.local:8765/reconnect` or `sudo systemctl restart switch-control` on the Pi. |
 | `unpaired` | Switch on Change Grip/Order → `pad.pair_fresh()`. |
-| daemon unreachable | `ssh pi "sudo systemctl status switch-control"` — daemon probably isn't running. |
+| daemon unreachable | `ssh pi "sudo systemctl status switch-control"` - daemon probably isn't running. |
 
 ### Daemon won't start
 
@@ -556,8 +556,8 @@ systemctl status bluetooth --no-pager
 
 ### Switch can't see the Pi (first-time pair)
 
-- Change Grip/Order times out after ~3 minutes — re-open it.
-- Move the Pi within 30cm of the Switch for the first pair — the Pi 4 antenna is weak.
+- Change Grip/Order times out after ~3 minutes - re-open it.
+- Move the Pi within 30cm of the Switch for the first pair - the Pi 4 antenna is weak.
 - Kill any zombie nxbt processes (see above).
 
 ### Authentication Failure (0x05) repeating

@@ -1,11 +1,11 @@
-# PI_CONTROLLER.md — Bluetooth deep-surgery reference
+# PI_CONTROLLER.md - Bluetooth deep-surgery reference
 
 > **Normal operations live in README.md.** This file covers three things you only need when something is broken:
 > 1. Wiping stale BT state on the Pi and the Switch
 > 2. Diagnosing and fixing `Authentication Failure (0x05)` bonding failures
 > 3. Inspecting raw BT traffic with `btmon`
 >
-> If you're setting up a fresh Pi, start with README.md §One-time Pi setup — it has the full setup commands. Come back here only if pairing fails.
+> If you're setting up a fresh Pi, start with README.md §One-time Pi setup - it has the full setup commands. Come back here only if pairing fails.
 
 ---
 
@@ -37,14 +37,14 @@ bluetoothctl show | grep -E 'Powered|Discoverable'
 ### On the Switch
 
 1. `Controllers → Disconnect Controllers`
-2. On that screen, **press and hold L+R simultaneously** until the screen confirms. (A quick tap is not enough — hold until you see the confirmation.)
+2. On that screen, **press and hold L+R simultaneously** until the screen confirms. (A quick tap is not enough - hold until you see the confirmation.)
 3. Back out, then go to `Controllers → Change Grip/Order` and leave it open.
 
 ---
 
 ## Monitoring BT traffic with btmon
 
-`btmon` is an X-ray for the BT stack. Run it in a tmux session whenever something isn't working — it captures everything at the HCI level.
+`btmon` is an X-ray for the BT stack. Run it in a tmux session whenever something isn't working - it captures everything at the HCI level.
 
 ```bash
 sudo tmux new -d -s btmon 'btmon 2>&1 | tee /tmp/btmon.log'
@@ -61,10 +61,10 @@ Interpreting what you see:
 
 | btmon output | Diagnosis |
 |---|---|
-| No `Connect Request` lines | Switch never saw the Pi — Switch-side or range/coexistence issue |
+| No `Connect Request` lines | Switch never saw the Pi - Switch-side or range/coexistence issue |
 | `Connect Request` + `Authentication Failure (0x05)` | Stale link keys → wipe both sides and retry |
-| `Connect Complete` but demo hangs | NXBT's higher-level HID handshake failed — check nxbt logs for tracebacks |
-| `Connect Complete` + `Simple Pairing Complete: Success` then disconnects with reason 3 | This is **normal** when testing with bluetoothctl as agent — the BT stack works, nxbt just doesn't speak HID from bluetoothctl |
+| `Connect Complete` but demo hangs | NXBT's higher-level HID handshake failed - check nxbt logs for tracebacks |
+| `Connect Complete` + `Simple Pairing Complete: Success` then disconnects with reason 3 | This is **normal** when testing with bluetoothctl as agent - the BT stack works, nxbt just doesn't speak HID from bluetoothctl |
 
 ---
 
@@ -72,10 +72,10 @@ Interpreting what you see:
 
 If `btmon` shows no `Connect Request` after putting the Switch on Change Grip/Order:
 
-- Change Grip/Order times out after ~3 minutes — make sure it's still open.
+- Change Grip/Order times out after ~3 minutes - make sure it's still open.
 - Confirm the Pi is actually advertising: `bluetoothctl show | grep -E 'Powered|Discoverable'` should print `yes` for both.
 - Move the Pi physically within 30cm of the Switch. The Pi 4's onboard antenna is weak and the first-pair BT handshake is sensitive to distance.
-- Run the zombie check — a stale nxbt process silently holds the adapter and blocks advertising.
+- Run the zombie check - a stale nxbt process silently holds the adapter and blocks advertising.
 
 ---
 
@@ -121,7 +121,7 @@ sudo systemctl daemon-reload && sudo systemctl restart bluetooth
 
 ### d. Piggyback on `bluetoothctl`'s D-Bus agent
 
-If a–c don't move the failure code, this is the root cause. NXBT does not register a pairing agent on the BlueZ D-Bus path on newer BlueZ versions. When the Switch initiates bonding, BlueZ asks "who confirms this pair?" and nobody answers — the kernel aborts with `0x05`.
+If a–c don't move the failure code, this is the root cause. NXBT does not register a pairing agent on the BlueZ D-Bus path on newer BlueZ versions. When the Switch initiates bonding, BlueZ asks "who confirms this pair?" and nobody answers - the kernel aborts with `0x05`.
 
 **Confirm the diagnosis:**
 
@@ -133,10 +133,10 @@ sudo busctl --system tree org.bluez | grep -i agent
 
 If this prints nothing, NXBT is the problem. (Sanity check: `sudo bluetoothctl` → `agent NoInputNoOutput` → `default-agent` registers an agent and the same `busctl` command lists it.)
 
-**Workaround** — let `bluetoothctl` own the agent while NXBT handles HID:
+**Workaround** - let `bluetoothctl` own the agent while NXBT handles HID:
 
 ```bash
-# Terminal 1 — keep this prompt open for the entire pairing attempt
+# Terminal 1 - keep this prompt open for the entire pairing attempt
 sudo bluetoothctl
 # at the bluetoothctl prompt:
 agent NoInputNoOutput
@@ -145,13 +145,13 @@ pairable on
 ```
 
 ```bash
-# Terminal 2 — kill any stale nxbt, then start the daemon
+# Terminal 2 - kill any stale nxbt, then start the daemon
 sudo pkill -9 -f nxbt
 sudo pkill -9 -f 'bin/python.*nxbt'
 sudo PYTHONUNBUFFERED=1 /home/yuvaltimen/nxbt/.venv/bin/python ~/Coding/nintendo/scripts/pi_daemon.py
 ```
 
-Switch: go to Change Grip/Order. Watch the `bluetoothctl` prompt — a `Request authorization` prompt may appear; type `yes`. Bonding completes with NXBT driving the HID side. May take two attempts — the first sometimes races and aborts; the second goes through.
+Switch: go to Change Grip/Order. Watch the `bluetoothctl` prompt - a `Request authorization` prompt may appear; type `yes`. Bonding completes with NXBT driving the HID side. May take two attempts - the first sometimes races and aborts; the second goes through.
 
 **Note:** The daemon already incorporates this workaround by spawning a `bluetoothctl` agent subprocess at startup. You only need the manual steps above if you're testing with nxbt directly (outside the daemon).
 
@@ -161,7 +161,7 @@ After applying any remediation, **always redo the stale-state wipe on both sides
 
 ## Zombie processes
 
-nxbt's shutdown path has a known multiprocessing bug. When the parent dies, workers get reparented to PID 1 and keep running — still holding the BT adapter. Every subsequent attempt mysteriously hangs at "Waiting for Switch to connect…".
+nxbt's shutdown path has a known multiprocessing bug. When the parent dies, workers get reparented to PID 1 and keep running - still holding the BT adapter. Every subsequent attempt mysteriously hangs at "Waiting for Switch to connect…".
 
 Check before every attempt:
 
@@ -176,9 +176,9 @@ sudo pkill -9 -f nxbt
 sudo pkill -9 -f 'bin/python.*nxbt'
 ```
 
-Avoid Ctrl-C on a hung process — it tends to leave orphans. Prefer killing the whole process group from another shell.
+Avoid Ctrl-C on a hung process - it tends to leave orphans. Prefer killing the whole process group from another shell.
 
-**Inspecting a hung nxbt** — if you need to know which Python line it's blocked on:
+**Inspecting a hung nxbt** - if you need to know which Python line it's blocked on:
 
 ```bash
 sudo apt install -y python3-pip
@@ -202,7 +202,7 @@ sleep 2
 sudo PYTHONUNBUFFERED=1 /home/yuvaltimen/nxbt/.venv/bin/python ~/Coding/nintendo/scripts/pi_daemon.py
 ```
 
-Your SSH session will die when Wi-Fi blocks. Wait up to 5 minutes — it comes back when the daemon finishes or the safety net fires. After the first successful pair, re-enable Wi-Fi (`sudo rfkill unblock wifi`) and subsequent reconnects will work fine with Wi-Fi on.
+Your SSH session will die when Wi-Fi blocks. Wait up to 5 minutes - it comes back when the daemon finishes or the safety net fires. After the first successful pair, re-enable Wi-Fi (`sudo rfkill unblock wifi`) and subsequent reconnects will work fine with Wi-Fi on.
 
 ---
 

@@ -13,10 +13,10 @@ Quick start:
   # 2. Verify the stream looks right (no commands sent):
   python scripts/vision_loop.py --device 1 --dry-run
 
-  # 3. Run live — side-by-side clean + annotated windows (default):
+  # 3. Run live - side-by-side clean + annotated windows (default):
   CAPTURE_DEVICE=1 python scripts/vision_loop.py
 
-  # 3a. Clean window only — use when this is your primary game monitor:
+  # 3a. Clean window only - use when this is your primary game monitor:
   CAPTURE_DEVICE=1 python scripts/vision_loop.py --clean
 
   # 3b. OBS Virtual Camera as source (OBS owns the physical card, you watch in OBS):
@@ -49,19 +49,19 @@ TARGET_FPS = 30
 
 
 # ─────────────────────────────────────────────────────────────
-# POLICY — edit this to define the control logic.
+# POLICY - edit this to define the control logic.
 #
 # Called on every frame that passes the cooldown gate.
 # Return a macro string to send to the Switch, or None.
 #
 # Args:
-#   frame    — BGR numpy array (H×W×3)
-#   results  — ultralytics Results object (results.boxes, results.names, etc.)
-#   w, h     — frame dimensions for normalizing coordinates
+#   frame    - BGR numpy array (H×W×3)
+#   results  - ultralytics Results object (results.boxes, results.names, etc.)
+#   w, h     - frame dimensions for normalizing coordinates
 # ─────────────────────────────────────────────────────────────
 
 def policy(frame, results, w: int, h: int) -> str | None:
-    """Stub policy — replace with your own logic.
+    """Stub policy - replace with your own logic.
 
     Example below: attack (Y) if a detected object is centered horizontally.
     """
@@ -190,7 +190,7 @@ def run_loop(
                 fps_live = frame_count / elapsed if elapsed > 0 else 0
 
                 if clean:
-                    # Raw frame, no annotations — use this as your primary game monitor.
+                    # Raw frame, no annotations - use this as your primary game monitor.
                     display = frame.copy()
                     cv2.putText(
                         display, f"{fps_live:.1f} fps",
@@ -201,7 +201,7 @@ def run_loop(
                             display, f"last cmd: {last_macro}",
                             (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2,
                         )
-                    cv2.imshow("Switch — live", display)
+                    cv2.imshow("Switch - live", display)
                 else:
                     # Side-by-side: clean frame on the left, YOLO annotations on the right.
                     annotated = results.plot()
@@ -215,7 +215,7 @@ def run_loop(
                             (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2,
                         )
                     combined = cv2.hconcat([frame, annotated])
-                    cv2.imshow("Switch — live | YOLO", combined)
+                    cv2.imshow("Switch - live | YOLO", combined)
 
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
@@ -266,7 +266,7 @@ def main() -> None:
         "--clean", action="store_true",
         help=(
             "Show a clean frame window only (no YOLO boxes). "
-            "Use this when the capture card is your primary game monitor — "
+            "Use this when the capture card is your primary game monitor - "
             "gives you a full view of the game without annotation clutter. "
             "Default (without --clean) shows clean + annotated side-by-side."
         ),

@@ -2,9 +2,9 @@
 BotW exploration macros for Breath of the Wild testing.
 
 Three categories, 15 macros total:
-  Town    — casual_stroll, npc_interact, sneaky_passage, shop_browse
-  Combat  — attack_combo, shield_parry, aerial_attack, bow_volley
-  Explore — paraglide_swing, cliff_climb, horizon_scan, call_and_ride,
+  Town    - casual_stroll, npc_interact, sneaky_passage, shop_browse
+  Combat  - attack_combo, shield_parry, aerial_attack, bow_volley
+  Explore - paraglide_swing, cliff_climb, horizon_scan, call_and_ride,
              cook_meal, map_survey, sprint_jump_glide
 
 Setup required before each macro is listed in its docstring.
@@ -120,7 +120,7 @@ def sneaky_passage(pad: RemotePad) -> None:
     """Toggle crouch, creep slowly through a narrow passage, un-crouch at the end.
 
     Setup: Position Link at the entrance of a building, alley, or guard patrol route.
-    Stamina doesn't matter — sneaking uses no resources.
+    Stamina doesn't matter - sneaking uses no resources.
     """
     pad.macro(SNEAKY_PASSAGE)
 
@@ -149,7 +149,7 @@ def shop_browse(pad: RemotePad) -> None:
     """Walk to a shop vendor, open their inventory, scroll right through 3 items, scroll back, exit.
 
     Setup: Face a shop keep (general goods, armor, etc.) about 2 steps away.
-    Note: A on the item will purchase if you have enough rupees — this macro stops before confirming.
+    Note: A on the item will purchase if you have enough rupees - this macro stops before confirming.
     """
     pad.macro(SHOP_BROWSE)
 
@@ -207,7 +207,7 @@ def shield_parry(pad: RemotePad) -> None:
     """Raise shield and hold it, then parry (ZL+A at the window), follow with 3 rapid strikes.
 
     Setup: Face a melee enemy with shield equipped. Time the A press to the enemy's swing.
-    This macro approximates the timing — real parries depend on the enemy's attack cadence.
+    This macro approximates the timing - real parries depend on the enemy's attack cadence.
     The 1.5s window gives you time to manually tweak the parry moment when testing.
     """
     pad.macro(SHIELD_PARRY)
@@ -298,7 +298,7 @@ def cliff_climb(pad: RemotePad) -> None:
 
     Setup: Face a climbable cliff or wall (rough rock surface). Link auto-grabs when
     the stick is held into the surface. The neutral pauses simulate stamina recovery
-    on ledge outcroppings — adjust pause lengths to match actual stamina bar length.
+    on ledge outcroppings - adjust pause lengths to match actual stamina bar length.
     """
     pad.macro(CLIFF_CLIMB)
 
@@ -345,7 +345,7 @@ def call_and_ride(pad: RemotePad) -> None:
 
     Setup: Be on foot in an open area where your registered horse can reach you.
     Holding MINUS is the "call horse" whistle. A mounts when the horse is alongside.
-    A during gallop applies a spur — each spur increases bonded horse's willingness.
+    A during gallop applies a spur - each spur increases bonded horse's willingness.
     """
     pad.macro(CALL_AND_RIDE)
 
@@ -381,7 +381,7 @@ def cook_meal(pad: RemotePad) -> None:
 
     Setup: Stand next to a lit cooking pot (found in stables, villages, enemy camps).
     Have at least 3 cooking ingredients in your inventory. The macro picks the top 3
-    items from the list — arrange ingredients you want combined ahead of time.
+    items from the list - arrange ingredients you want combined ahead of time.
     """
     pad.macro(COOK_MEAL)
 
@@ -402,7 +402,7 @@ MAP_SURVEY = textwrap.dedent("""\
 def map_survey(pad: RemotePad) -> None:
     """Open the map, pan right and down, sweep left, tilt back up, close map.
 
-    Setup: Anywhere in the game — works any time you want a scripted map pan.
+    Setup: Anywhere in the game - works any time you want a scripted map pan.
     R_STICK on the map screen scrolls the view. PLUS opens and closes the map.
     """
     pad.macro(MAP_SURVEY)
@@ -424,7 +424,7 @@ def sprint_jump_glide(pad: RemotePad) -> None:
     """Running jump off a slope, glider deploy, steer in an S-curve, glide to landing.
 
     Setup: Stand at the top of a hill or ramp with paraglider unlocked and stamina available.
-    Lighter than the full paraglide_swing — useful for shorter descents and testing
+    Lighter than the full paraglide_swing - useful for shorter descents and testing
     how the glider behaves on gently sloped terrain vs. sharp cliffs.
     """
     pad.macro(SPRINT_JUMP_GLIDE)
@@ -475,7 +475,7 @@ def _list_macros() -> None:
 def _run_all(pad: RemotePad) -> None:
     for name, (fn, cat, desc) in MACROS.items():
         pad.wait_for_ready(
-            f"\n[{cat}] {name} — {desc}\n"
+            f"\n[{cat}] {name} - {desc}\n"
             f"  Setup: see docstring (python -c \"from scripts.botw_macros import {name}; help({name})\")\n"
             f"  Press Enter to run, Ctrl-C to skip to next, Ctrl-D to exit. "
         )
@@ -514,7 +514,7 @@ def main() -> None:
             print(f"Unknown macro '{args.macro}'. Run with --list to see available macros.")
             sys.exit(1)
         fn, cat, desc = MACROS[args.macro]
-        print(f"[{cat}] {args.macro} — {desc}")
+        print(f"[{cat}] {args.macro} - {desc}")
         print(f"Docstring: {fn.__doc__}\n")
         pad.wait_for_ready("Position Link as described above. Press Enter to run. ")
         fn(pad)
