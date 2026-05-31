@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switch_control import RemotePad, Buttons, Sticks  # noqa: E402
 
-host = os.environ.get("PI_HOST", "pi.local")
+host = os.environ.get("PI_HOST", "raspberrypi.local")
 pad = RemotePad(host)
 
 pad.wait_connected(timeout=15)

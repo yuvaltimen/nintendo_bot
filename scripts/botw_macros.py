@@ -22,7 +22,7 @@ Or just paste any MACRO_* string directly:
 ────────────────────────────────────────────────────────────────
 Standalone runner (handoff prompts between each macro):
 
-    PI_HOST=pi.local python scripts/botw_macros.py [macro_name]
+    PI_HOST=raspberrypi.local python scripts/botw_macros.py [macro_name]
 
     # list all macros:
     python scripts/botw_macros.py --list
@@ -501,7 +501,7 @@ def main() -> None:
         _list_macros()
         return
 
-    host = os.environ.get("PI_HOST", "pi.local")
+    host = os.environ.get("PI_HOST", "raspberrypi.local")
     port = int(os.environ.get("PI_PORT", "8765"))
     pad = RemotePad(host, port)
 

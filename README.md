@@ -58,7 +58,7 @@ Do this once on a fresh Pi. If the daemon is already running successfully, skip 
 Use Raspberry Pi Imager → Raspberry Pi OS 64-bit (Bookworm). In advanced options: hostname (`pi`), SSH enabled, Wi-Fi configured, username `yuvaltimen`.
 
 ```bash
-ssh yuvaltimen@pi.local
+ssh yuvaltimen@raspberrypi.local
 sudo apt update && sudo apt full-upgrade -y && sudo reboot
 ```
 
@@ -157,7 +157,7 @@ The client is stdlib-only. No pip install on the Mac. Set the Pi hostname once:
 
 ```bash
 # ~/.zshrc
-export PI_HOST=pi.local    # or the Pi's IP address
+export PI_HOST=raspberrypi.local    # or the Pi's IP address
 ```
 
 ---
@@ -341,7 +341,7 @@ pad.wait_connected()
 
 **Long macros and reconnects** — if BT drops mid-macro, the endpoint returns `NotConnected` and the macro is lost. After the watchdog reconnects, re-issue it. Break long sequences into chunks wrapped in `pad.run_resilient`.
 
-**mDNS (`pi.local`)** — if it doesn't resolve from your Mac, use the Pi's IP directly. Find it with `ip addr` on the Pi or your router's DHCP table.
+**mDNS (`raspberrypi.local`)** — if it doesn't resolve from your Mac, use the Pi's IP directly. Find it with `ip addr` on the Pi or your router's DHCP table.
 
 **Switch auto-sleep** — drops the controller bond. Disable for long sessions: `System Settings → Sleep Mode → Auto-Sleep → Never`. The watchdog reconnects after wake, but the interruption is annoying mid-macro.
 
@@ -368,13 +368,13 @@ systemctl cat bluetooth | grep ExecStart    # must show --noplugin=input
 ### `NotConnected` error from a Mac script
 
 ```bash
-curl http://pi.local:8765/status    # check the 'state' field
+curl http://raspberrypi.local:8765/status    # check the 'state' field
 ```
 
 | `state` | Fix |
 |---|---|
 | `reconnecting` | Wait 10–15s and retry. |
-| `crashed` | `curl -X POST http://pi.local:8765/reconnect` or `sudo systemctl restart switch-control` on the Pi. |
+| `crashed` | `curl -X POST http://raspberrypi.local:8765/reconnect` or `sudo systemctl restart switch-control` on the Pi. |
 | `unpaired` | Switch on Change Grip/Order → `pad.pair_fresh()`. |
 | daemon unreachable | `ssh pi "sudo systemctl status switch-control"` — daemon probably isn't running. |
 
@@ -407,7 +407,7 @@ sudo systemctl start bluetooth
 
 Then retry the first-time pair flow. If it still fails → `PI_CONTROLLER.md` §Authentication Failure for the full `a/b/c/d` remediation tree including the BlueZ agent workaround.
 
-### `pi.local` doesn't resolve
+### `raspberrypi.local` doesn't resolve
 
 ```bash
 ssh pi "ip addr show wlan0 | grep 'inet '"    # get the Pi's IP
@@ -450,7 +450,7 @@ nintendo/
 | Mac REPL | `python scripts/interactive.py` |
 | List BotW macros | `python scripts/botw_macros.py --list` |
 | Run a BotW macro | `python scripts/botw_macros.py <name>` |
-| Check connection | `curl http://pi.local:8765/status` |
-| Force reconnect | `curl -X POST http://pi.local:8765/reconnect` |
-| Force fresh pair | `curl -X POST http://pi.local:8765/pair` (Switch on Change Grip/Order) |
-| API docs (browser) | `http://pi.local:8765/docs` |
+| Check connection | `curl http://raspberrypi.local:8765/status` |
+| Force reconnect | `curl -X POST http://raspberrypi.local:8765/reconnect` |
+| Force fresh pair | `curl -X POST http://raspberrypi.local:8765/pair` (Switch on Change Grip/Order) |
+| API docs (browser) | `http://raspberrypi.local:8765/docs` |
