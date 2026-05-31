@@ -44,6 +44,7 @@ Environment variables:
 """
 
 import argparse
+import base64
 import json
 import os
 import signal
@@ -100,8 +101,37 @@ Respond with ONLY a valid JSON object — no extra text, no markdown fences:
 Rules:
 - Keep macros under 3 seconds total duration.
 - Prefer small, incremental movements.
-- If nothing useful is visible, return an empty macro string.
+- If nothing useful is visible, evaluate surroundings in the vicinity until you find something.
+- Do not repeat the same macro more than 3 turns in a row if the scene has not changed.
+"""
+
+# Vision-mode system prompt — used when --vision is set and a vision-capable
+# model (e.g. llama3.2-vision, llava, moondream) is selected via OLLAMA_MODEL.
+# The LLM receives the YOLO-annotated frame as a JPEG image instead of a text
+# scene description, so we drop the "detected objects" framing.
+SYSTEM_PROMPT_VISION = f"""You are an AI agent playing The Legend of Zelda: Breath of the Wild.
+
+Each turn you receive a screenshot from the game with YOLO bounding boxes drawn on any detected
+objects. A list of your recent actions is included in the text.
+
+Respond with ONLY a valid JSON object — no extra text, no markdown fences:
+{{"reasoning": "<one sentence: what you see and why you chose this action>",
+  "macro": "<macro string to execute, or empty string to wait this tick>"}}
+
+{CONTROLLER_REF}
+
+Rules:
+- Keep macros under 3 seconds total duration.
+- Prefer small, incremental movements.
 - Do not repeat the same macro more than 3 turns in a row if the scene has not changed."""
+
+
+# ── image encoding ────────────────────────────────────────────────────────────
+
+def encode_jpeg(frame, quality: int = 75) -> str:
+    """Encode a BGR numpy frame as a base64 JPEG string for the Ollama images field."""
+    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return base64.standard_b64encode(buf).decode("utf-8")
 
 
 # ── shared state ──────────────────────────────────────────────────────────────
@@ -120,6 +150,7 @@ class SharedState:
 
         # Written by main thread, read by REPL thread
         self._scene_desc: str = "No detections yet."
+        self._latest_annotated = None   # clean YOLO-annotated frame (no display overlays)
 
         # Written by REPL thread, read by main thread for display
         self._goal:         str  = ""
@@ -135,6 +166,10 @@ class SharedState:
     def set_scene(self, desc: str) -> None:
         with self._lock:
             self._scene_desc = desc
+
+    def set_annotated_frame(self, frame) -> None:
+        with self._lock:
+            self._latest_annotated = frame
 
     # ── REPL thread writes ────────────────────────────────────────────────
     def set_goal(self, goal: str) -> None:
@@ -161,6 +196,10 @@ class SharedState:
     def get_scene(self) -> str:
         with self._lock:
             return self._scene_desc
+
+    def get_annotated_frame(self):
+        with self._lock:
+            return self._latest_annotated
 
     def has_active_goal(self) -> bool:
         with self._lock:
@@ -212,12 +251,27 @@ def check_ollama() -> tuple[bool, str]:
         )
 
 
-def call_phi4(messages: list[dict], stop_event: threading.Event, timeout: float = 90.0) -> str:
+def call_phi4(
+    messages: list[dict],
+    stop_event: threading.Event,
+    image_b64: str | None = None,
+    timeout: float = 90.0,
+) -> str:
     """
-    Stream a phi4 response. Checks stop_event between tokens so cancellation
-    fires within one token (~50 ms) rather than waiting for the full response.
-    Returns empty string if cancelled.
+    Stream a response from Ollama. Checks stop_event between tokens so
+    cancellation fires within one token (~50 ms). Returns empty string if
+    cancelled.
+
+    image_b64: base64-encoded JPEG to attach to the last user message.
+               Requires a vision-capable model (e.g. llama3.2-vision, llava).
+               Standard phi4 will ignore or error on the images field.
     """
+    if image_b64:
+        # Attach the image to the last user message in-place.
+        # Ollama expects: {"role": "user", "content": "...", "images": ["<b64>"]}
+        last = messages[-1]
+        messages = messages[:-1] + [{**last, "images": [image_b64]}]
+
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "messages": messages,
@@ -261,12 +315,24 @@ def parse_response(raw: str) -> tuple[str, str]:
 
 # ── REPL thread ───────────────────────────────────────────────────────────────
 
-def goal_loop(goal: str, pad: RemotePad, state: SharedState, interval: float) -> None:
-    """Run one goal until stop_goal is set. Runs in the REPL thread."""
+def goal_loop(
+    goal: str,
+    pad: RemotePad,
+    state: SharedState,
+    interval: float,
+    vision: bool = False,
+) -> None:
+    """Run one goal until stop_goal is set. Runs in the REPL thread.
+
+    vision=True: encode the latest YOLO-annotated frame as a JPEG and attach
+    it to the Ollama message instead of the text scene description. Requires a
+    vision-capable model (set OLLAMA_MODEL=llama3.2-vision or similar).
+    """
     last_call_t: float = 0.0
     action_history: list[str] = []
 
-    print(f"[running] {goal}\n", flush=True)
+    mode_tag = "[vision]" if vision else "[text]"
+    print(f"[running] {goal}  {mode_tag}\n", flush=True)
 
     while not state.stop_goal.is_set() and not state.exit_app.is_set():
         now = time.time()
@@ -275,24 +341,37 @@ def goal_loop(goal: str, pad: RemotePad, state: SharedState, interval: float) ->
             continue
 
         last_call_t = now
-        scene = state.get_scene()
         history_str = "\n".join(action_history[-5:]) or "(none yet)"
 
+        if vision:
+            annotated = state.get_annotated_frame()
+            if annotated is None:
+                time.sleep(0.1)
+                continue
+            image_b64 = encode_jpeg(annotated)
+            system = SYSTEM_PROMPT_VISION
+            user_text = (
+                f"Goal: {goal}\n\n"
+                f"Recent actions:\n{history_str}\n\n"
+                "What should Link do next?"
+            )
+        else:
+            image_b64 = None
+            system = SYSTEM_PROMPT
+            user_text = (
+                f"Goal: {goal}\n\n{state.get_scene()}\n\n"
+                f"Recent actions:\n{history_str}\n\n"
+                "What should Link do next?"
+            )
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Goal: {goal}\n\n{scene}\n\n"
-                    f"Recent actions:\n{history_str}\n\n"
-                    "What should Link do next?"
-                ),
-            },
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_text},
         ]
 
         state.set_phi4_status(in_call=True)
         try:
-            raw = call_phi4(messages, state.stop_goal)
+            raw = call_phi4(messages, state.stop_goal, image_b64=image_b64)
         except urllib.error.URLError as e:
             state.set_phi4_status(in_call=False)
             print(f"  [ollama error]  {e}", flush=True)
@@ -323,12 +402,14 @@ def goal_loop(goal: str, pad: RemotePad, state: SharedState, interval: float) ->
             print(f"  [wait]   {reasoning or '(no action)'}", flush=True)
 
 
-def repl_thread_fn(pad: RemotePad, state: SharedState, interval: float) -> None:
+def repl_thread_fn(pad: RemotePad, state: SharedState, interval: float, vision: bool = False) -> None:
     """Runs in a background daemon thread. Owns the terminal prompt."""
+    mode_line = "vision (annotated JPEG → LLM)" if vision else "text (YOLO detections → LLM)"
     print(f"""
 phi4 Agent — Breath of the Wild
   model    : {OLLAMA_MODEL}  (via Ollama at {OLLAMA_HOST})
   interval : {interval}s between LLM calls
+  input    : {mode_line}
   display  : always-on in separate window
 
 Commands:
@@ -361,7 +442,7 @@ Commands:
         state.stop_goal.clear()
         state.set_goal(goal)
         try:
-            goal_loop(goal, pad, state, interval)
+            goal_loop(goal, pad, state, interval, vision=vision)
         finally:
             state.clear_goal()
 
@@ -396,13 +477,17 @@ def display_loop(
         now     = time.time()
         results = yolo(frame, verbose=False)[0]
 
-        # Push latest scene description to shared state for the REPL thread
+        # Push latest scene data to shared state for the REPL thread.
+        # Store the clean annotated frame (YOLO boxes only, no display overlays)
+        # before we mutate it with fps text / goal / reasoning overlays.
+        annotated_clean = results.plot()
         state.set_scene(describe_scene(results))
+        state.set_annotated_frame(annotated_clean)
 
         goal, reasoning, macro, in_phi4 = state.get_display_info()
 
-        # ── build annotated right panel ────────────────────────────────────
-        annotated = results.plot()
+        # ── build annotated right panel (display copy, with overlays) ──────
+        annotated = annotated_clean.copy()
         elapsed   = now - t_start
         fps       = frame_count / elapsed if elapsed > 0 else 0
 
@@ -497,9 +582,17 @@ def main() -> None:
     parser.add_argument("--yolo-model",
                         default=os.environ.get("YOLO_MODEL", "yolov8n.pt"))
     parser.add_argument("--interval", type=float, default=5.0,
-                        help="Seconds between phi4 calls (default: 5.0).")
+                        help="Seconds between LLM calls (default: 5.0).")
     parser.add_argument("--scale", type=float, default=0.65,
                         help="Display window scale factor (default: 0.65 to fit a MacBook).")
+    parser.add_argument(
+        "--vision", action="store_true",
+        help=(
+            "Send the YOLO-annotated frame as a JPEG image instead of a text scene description. "
+            "Requires a vision-capable model — set OLLAMA_MODEL to llama3.2-vision, llava, "
+            "moondream, or another Ollama vision model. Standard phi4 (text-only) will error."
+        ),
+    )
     args = parser.parse_args()
 
     # ── pre-flight ─────────────────────────────────────────────────────────
@@ -537,10 +630,15 @@ def main() -> None:
     state = SharedState()
     install_signal_handler(state, pad)
 
+    if args.vision:
+        print("Vision mode: annotated JPEG will be sent to the LLM each call.")
+        print(f"  Make sure OLLAMA_MODEL ({OLLAMA_MODEL}) is a vision-capable model.\n")
+
     # ── start REPL in background thread ───────────────────────────────────
     t = threading.Thread(
         target=repl_thread_fn,
         args=(pad, state, args.interval),
+        kwargs={"vision": args.vision},
         daemon=True,   # exits automatically when main thread exits
     )
     t.start()
