@@ -26,7 +26,7 @@ pad.press(Buttons.A)  # x2
 
 # Or 
 
-python scripts/botw_macros.py horizontal_scan
+python scripts/botw_macros.py horizon_scan
 ```
 
 
@@ -60,14 +60,15 @@ The daemon reconnects to the Switch within ~10 seconds of it waking. If `systemc
 ## Architecture
 
 ```
-Mac (you / scripts / future LLM)
-   ↓ HTTP (port 8765)
-Raspberry Pi
-   ├─ switch-control daemon (uvicorn + FastAPI)
-   ├─ nxbt → BlueZ → virtual Pro Controller
-   └─ bluetoothctl pairing agent (started by the daemon)
-   ↓ Bluetooth
-Nintendo Switch  ←  (your real joycons paired in parallel)
+Nintendo Switch (docked)
+   ├─ HDMI out → passive splitter
+   │                 ├─ TV / monitor          (you watch here)
+   │                 └─ USB capture card → Mac
+   │                       ↓ OpenCV VideoCapture
+   │                       ↓ YOLO inference
+   │                       ↓ policy()
+   └─ Bluetooth ← Pi daemon ← HTTP ← Mac scripts / vision_loop.py
+                                         (same pad API for both)
 ```
 
 The daemon keeps the BT pad connected across many script runs. It heartbeats every 5 seconds and auto-reconnects on drop. Mac scripts are stateless clients — start, send commands, exit; the BT link survives.
@@ -315,6 +316,146 @@ From the interactive REPL:
 
 ---
 
+## HDMI capture and vision loop
+
+This section is the end-to-end walkthrough for getting `scripts/vision_loop.py` running: hardware wiring, Mac software setup, finding the capture device, verifying the feed, and writing a policy that sends macros back to the Switch.
+
+### Hardware you need
+
+| Item | Notes |
+|---|---|
+| **Passive HDMI splitter** (1-in, 2-out) | ~$10–15 on Amazon. Passive splitters work — the Switch doesn't use HDCP. |
+| **USB HDMI capture card** (UVC-compliant) | ~$15–25 generic ("HDMI USB capture card UVC"), or Elgato Cam Link 4K (~$100) for reliability. Avoid the Elgato HD60 — it requires proprietary software. |
+
+The Switch outputs HDMI **only when docked**. Handheld mode has no video out.
+
+### Wiring
+
+```
+Switch dock
+  HDMI out → passive splitter
+                ├── TV or monitor          ← you watch here, zero latency
+                └── capture card HDMI in
+                      USB → Mac
+```
+
+### One-time Mac setup
+
+```bash
+pip install opencv-python ultralytics
+```
+
+`ultralytics` automatically uses Apple Silicon's Metal (MPS) GPU backend — no extra configuration needed.
+
+### Step 1: Find the capture card's device index
+
+Plug the capture card in and run:
+
+```bash
+python scripts/vision_loop.py --scan
+```
+
+Expected output:
+
+```
+[0]  readable      1280x720  @ 30 fps   ← Mac built-in camera
+[1]  readable      1920x1080 @ 30 fps   ← capture card  ← use this
+```
+
+The index changes if you plug into a different USB port or change the port order. Re-run `--scan` if the index ever stops working.
+
+### Step 2: Verify the feed before enabling control
+
+Run with `--dry-run` — this opens the display window, runs YOLO inference, and prints what commands *would* be sent, but never touches the Switch:
+
+```bash
+python scripts/vision_loop.py --device 1 --dry-run
+```
+
+You should see a side-by-side window: raw game feed on the left, YOLO boxes on the right. Confirm the image looks correct (right orientation, no colour channel swap) before proceeding.
+
+Set `CAPTURE_DEVICE` so you don't have to type `--device` every time:
+
+```bash
+# ~/.zshrc
+export CAPTURE_DEVICE=1
+```
+
+### Step 3: Choose a display mode
+
+Three modes — pick based on your setup:
+
+| Flag | Window shown | When to use |
+|---|---|---|
+| *(none, default)* | Side-by-side: clean left, YOLO annotations right | Tuning the policy — see the raw game and what the model detects at the same time |
+| `--clean` | Clean frame only, last command shown at bottom | Capture card is your only monitor; want a full view without annotation clutter |
+| `--no-display` | None | TV/monitor on the splitter is your display; run the script headless |
+
+### Step 4: Write the policy
+
+Open `scripts/vision_loop.py` and edit the `policy()` function near the top of the file. It receives every frame that passes the cooldown gate and returns a macro string or `None`:
+
+```python
+def policy(frame, results, w: int, h: int) -> str | None:
+    # results.boxes contains detected objects for this frame.
+    # results.names maps class id → label string.
+    # Return a macro string to send, or None to do nothing.
+
+    for box in results.boxes:
+        cls_name = results.names[int(box.cls)]
+        conf = float(box.conf)
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        box_cx = (x1 + x2) / 2
+
+        if cls_name == "person" and conf > 0.5:
+            if abs(box_cx - w / 2) < w / 4:   # roughly centred
+                return "Y 0.1s"                 # attack
+
+    return None
+```
+
+The macro string uses the same DSL as `pad.macro()` — see [Macro DSL](#macro-dsl). The `--cooldown` flag (default 0.5s) gates how often `policy()` can fire a command.
+
+The default YOLO model (`yolov8n.pt`) is trained on COCO classes (person, car, dog, etc.) — useful for structural testing but not BotW-specific. Swap in a fine-tuned model via `--model path/to/model.pt` or `$YOLO_MODEL` once you have one.
+
+### Step 5: Run live
+
+```bash
+# Splitter → TV is your primary display, script runs headless:
+python scripts/vision_loop.py --no-display
+
+# Capture card is your only monitor, clean view:
+python scripts/vision_loop.py --clean
+
+# Tuning mode — side-by-side clean + annotated:
+python scripts/vision_loop.py
+```
+
+Press `Q` in the display window or `Ctrl-C` to stop. The Pi pad stays connected.
+
+### Latency expectations
+
+| Stage | Time |
+|---|---|
+| Frame capture + buffer drain | ~10–33ms |
+| YOLO inference (yolov8n, Apple Silicon) | ~5–15ms |
+| HTTP to Pi + Bluetooth to Switch | ~30–50ms |
+| **Total round-trip** | **~50–100ms** |
+
+50–100ms is fine for strategic decisions (navigate toward a target, attack when an enemy is centred, interact with an object). It is **not** tight enough for frame-perfect inputs like parry timing — use scripted macros from `botw_macros.py` for those.
+
+### Troubleshooting capture
+
+**`Cannot open capture device 1`** — re-run `--scan`, the index may have shifted. Also try passing `--device 0` explicitly.
+
+**Image is upside-down or mirrored** — add a `cv2.flip(frame, 1)` at the top of `policy()`, or flip before inference in `run_loop`.
+
+**YOLO is slow / dropping frames** — switch to `yolov8n.pt` (nano) if not already using it, or lower the capture resolution: edit `FRAME_W`/`FRAME_H` at the top of `vision_loop.py`.
+
+**Commands firing too rapidly** — increase `--cooldown` (default 0.5s). For exploration loops, 1–2s is more appropriate.
+
+---
+
 ## Pairing and recovery
 
 ### First-ever pair
@@ -458,7 +599,8 @@ nintendo/
 │   ├── pi_daemon.py                 entry point: run on the Pi
 │   ├── interactive.py               entry point: run on the Mac, REPL
 │   ├── example_handoff.py           handoff demo
-│   └── botw_macros.py               15 BotW macros (town / combat / explore)
+│   ├── botw_macros.py               15 BotW macros (town / combat / explore)
+│   └── vision_loop.py               HDMI capture → YOLO → control loop
 └── systemd/
     └── switch-control.service       optional autostart on the Pi
 ```
@@ -477,6 +619,9 @@ nintendo/
 | Mac REPL | `python scripts/interactive.py` |
 | List BotW macros | `python scripts/botw_macros.py --list` |
 | Run a BotW macro | `python scripts/botw_macros.py <name>` |
+| Scan capture devices | `python scripts/vision_loop.py --scan` |
+| Vision loop (dry-run) | `python scripts/vision_loop.py --device 1 --dry-run` |
+| Vision loop (live) | `CAPTURE_DEVICE=1 python scripts/vision_loop.py` |
 | Check connection | `curl http://raspberrypi.local:8765/status` |
 | Force reconnect | `curl -X POST http://raspberrypi.local:8765/reconnect` |
 | Force fresh pair | `curl -X POST http://raspberrypi.local:8765/pair` (Switch on Change Grip/Order) |
