@@ -997,6 +997,42 @@ pad.wait_connected()
 
 ## Troubleshooting
 
+### `nxbt state=crashed` reconnect loop (most common during long agent runs)
+
+**Symptom:** Daemon logs repeat `nxbt state=crashed — triggering recovery reconnect` every ~13 seconds, with 503s between each reconnect. The Switch stays connected, macros work briefly, then crash again.
+
+**Cause: Wi-Fi/BT antenna sharing on Pi 4.** The onboard radios share one antenna. SSH traffic (especially tailing daemon logs) saturates Wi-Fi and stomps on the Bluetooth signal. nxbt's internal recovery fails → `state=crashed`. The watchdog reconnects in ~1.5 s and the cycle repeats.
+
+**Immediate check:** look at what `bluez_link_up` says in the warning line. As of the latest daemon version it logs:
+```
+nxbt state=crashed (bluez_link_up=False) — triggering recovery reconnect
+```
+If `bluez_link_up=False`, BlueZ also sees the link as down — this confirms a radio-level drop, not just nxbt confusion.
+
+**Fix 1 (recommended): disable Wi-Fi on the Pi and use Ethernet.**
+```bash
+# SSH in over Ethernet first, then:
+sudo rfkill block wifi
+sudo systemctl restart switch-control
+```
+This eliminates antenna contention entirely. Reconnect loops almost always stop immediately.
+
+**Fix 2: if Ethernet isn't available**, keep Wi-Fi on but reduce contention:
+```bash
+# On the Pi — limit SSH keepalive traffic and reduce scan activity
+sudo iwconfig wlan0 power off     # disable Wi-Fi power management (reduces spurious activity)
+```
+
+**Mac-side resilience (already in place after recent update):** All agent scripts now call `pad.macro(macro, retries=2, recover_timeout=15.0)`. If a 503 arrives during a reconnect window, the Mac waits up to 15 s for the daemon to recover and retries the macro automatically — the agent loop survives without losing its current goal.
+
+**After fixing the antenna issue**, you can tail daemon logs with less impact by using `journalctl` over SSH rather than a live tmux session:
+```bash
+# Pull the last 50 lines on demand rather than streaming:
+ssh pi "sudo journalctl -u switch-control -n 50 --no-pager"
+```
+
+---
+
 ### `Address already in use` / `Operation not permitted` on PSM 17 or 19
 
 BlueZ `input` plugin is still loaded, or a zombie nxbt process is holding the ports.

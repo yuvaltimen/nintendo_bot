@@ -273,7 +273,7 @@ def run_agent(
                         if dry_run:
                             print(f"[dry-run]  {macro!r}")
                         else:
-                            pad.macro(macro)
+                            pad.macro(macro, retries=2, recover_timeout=15.0)
                             print(f"[sent]     {macro!r}")
                         if reasoning:
                             print(f"           → {reasoning}")

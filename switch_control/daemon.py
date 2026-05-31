@@ -29,6 +29,13 @@ log = logging.getLogger("switch_control.daemon")
 HEARTBEAT_INTERVAL_S = 10.0
 RECONNECT_BACKOFF_S = 3.0
 BLUEZ_INFO_TIMEOUT_S = 2.0
+# After a crash/reconnect, check more frequently for a few cycles so that
+# an immediate re-crash is caught quickly rather than waiting 10s.
+POST_RECONNECT_FAST_S = 3.0
+POST_RECONNECT_FAST_CYCLES = 4
+# Ignore a second /stop within this window — two rapid clear_macros() calls
+# can corrupt the nxbt worker when the BT link is already under stress.
+STOP_DEDUP_S = 0.5
 
 
 class PressRequest(BaseModel):
@@ -59,6 +66,7 @@ class Daemon:
         self.last_command_at: float = 0.0
         self.last_error: Optional[str] = None
         self.last_heartbeat_ok: bool = False
+        self._last_stop_t: float = 0.0
         self.started_at: float = time.time()
         self._stop = threading.Event()
         self.app = FastAPI(title="Switch Control Daemon")
@@ -183,15 +191,28 @@ class Daemon:
         by re-establishing the L2CAP sockets. Racing it caused the dbus NoReply
         crashes we saw - so we let it do its thing and only step in if state ends
         up at 'crashed' (the unambiguous nxbt-gave-up signal).
+
+        After a reconnect we use shorter check intervals for POST_RECONNECT_FAST_CYCLES
+        cycles so that an immediate re-crash (e.g. due to Wi-Fi/BT antenna contention)
+        is caught in ~3 s rather than waiting the full 10 s heartbeat.
         """
+        fast_cycles_remaining = 0
         while not self._stop.is_set():
-            time.sleep(HEARTBEAT_INTERVAL_S)
+            interval = POST_RECONNECT_FAST_S if fast_cycles_remaining > 0 else HEARTBEAT_INTERVAL_S
+            time.sleep(interval)
+            if fast_cycles_remaining > 0:
+                fast_cycles_remaining -= 1
+
             self.last_heartbeat_ok = self._bluez_link_up()
             state = self._state_str()
             if state == "crashed":
-                log.warning("nxbt state=crashed - triggering recovery reconnect")
+                log.warning(
+                    "nxbt state=crashed (bluez_link_up=%s) — triggering recovery reconnect",
+                    self.last_heartbeat_ok,
+                )
                 self._pair(fresh=False)
                 time.sleep(RECONNECT_BACKOFF_S)
+                fast_cycles_remaining = POST_RECONNECT_FAST_CYCLES
 
     # ----- HTTP -----
 
@@ -306,6 +327,13 @@ class Daemon:
         @app.post("/stop")
         def stop():
             with self.lock:
+                now = time.time()
+                if now - self._last_stop_t < STOP_DEDUP_S:
+                    # Second /stop within the dedup window — skip the clear_macros
+                    # call. Two rapid clear_macros() can corrupt the nxbt worker
+                    # when the BT link is already under stress (e.g. rapid Ctrl-C).
+                    return {"ok": True, "deduped": True}
+                self._last_stop_t = now
                 try:
                     if self.idx is not None:
                         self.nx.clear_macros(self.idx)

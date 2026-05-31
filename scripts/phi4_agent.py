@@ -313,7 +313,7 @@ def goal_loop(goal: str, pad: RemotePad, state: SharedState, interval: float) ->
         if macro and not state.stop_goal.is_set():
             action_history.append(f"[{time.strftime('%H:%M:%S')}] {macro!r}")
             try:
-                pad.macro(macro)
+                pad.macro(macro, retries=2, recover_timeout=15.0)
                 print(f"  [sent]   {macro!r}", flush=True)
             except Exception as e:
                 print(f"  [pad error]  {e}", flush=True)
