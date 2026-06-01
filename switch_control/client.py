@@ -8,31 +8,92 @@ import urllib.request
 
 
 def scrub_macro(script: str) -> str:
-    """Strip inline # comments and comment-only lines from a macro string.
+    """Strip inline # comments, comment-only lines, and Unicode dash variants.
 
-    nxbt's macro tokenizer splits each line on whitespace and tries to match
-    every token as a button name, stick value, or duration.  A trailing comment
-    like "Y 0.1s  # attack" produces the unknown token "#" followed by "attack",
-    which raises an exception inside the nxbt worker process.  That exception
-    kills the worker, putting the controller into state=crashed and triggering
-    the daemon's reconnect cycle.
+    Two classes of problem are fixed:
 
-    This function is applied automatically inside RemotePad.macro() so all
-    callers are protected.  Agents can also call it explicitly before the
-    pad.macro() call to log what was stripped for diagnostics.
+    1. Inline # comments — nxbt's tokenizer has no comment syntax.  "Y 0.1s  #
+       attack" produces unknown tokens "#" and "attack", crashing the nxbt worker.
 
-    Rules:
-    - Everything from the first # to end-of-line is removed.
-    - Lines that become empty after stripping are dropped entirely.
-    - Indentation is preserved (important for LOOP blocks).
-    - Returns empty string if the whole script reduces to nothing.
+    2. Unicode dashes — LLMs sometimes generate en-dashes (–, U+2013), em-dashes
+       (—, U+2014), or minus signs (−, U+2212) inside stick coordinates instead of
+       ASCII hyphens.  "L_STICK@+000–100" is an invalid token; normalising to
+       "L_STICK@+000-100" fixes it silently.
+
+    Applied automatically inside RemotePad.macro() so all callers are protected.
     """
+    # Unicode dash → ASCII hyphen (must run before comment stripping)
+    script = (
+        script
+        .replace('–', '-')   # en-dash
+        .replace('—', '-')   # em-dash
+        .replace('−', '-')   # minus sign
+    )
     cleaned_lines = []
     for line in script.splitlines():
         clean = re.sub(r'\s*#.*$', '', line)
         if clean.strip():
             cleaned_lines.append(clean)
     return '\n'.join(cleaned_lines)
+
+
+# Buttons that indicate timing-sensitive or combat/interaction actions.
+# Macros containing any of these should NOT be auto-extended.
+_COMBAT_TOKENS = re.compile(
+    r'\b(Y|X|A|ZL|ZR|PLUS|MINUS|DPAD_UP|DPAD_DOWN|DPAD_LEFT|DPAD_RIGHT'
+    r'|L_STICK_PRESS|R_STICK_PRESS)\b'
+)
+_DURATION_RE = re.compile(r'(\d+(?:\.\d+)?)s')
+_BARE_DURATION_LINE = re.compile(r'^\s*\d+(?:\.\d+)?s\s*$')
+
+
+def extend_macro_to_interval(macro: str, interval: float, buffer: float = 0.3) -> str:
+    """Extend a pure-movement macro to fill the agent's decision interval.
+
+    Between LLM calls the controller goes silent, leaving Link standing still.
+    This function appends one extra line that repeats the last movement inputs
+    for however long is needed to bring the total macro duration close to
+    `interval - buffer` seconds.
+
+    Macros that contain combat or interaction buttons (Y, A, X, ZL, ZR, DPAD,
+    etc.) are returned unchanged — those sequences have frame-timing constraints
+    that must not be padded.
+
+    Args:
+        macro:    Macro string, already scrubbed.
+        interval: Agent decision interval in seconds.
+        buffer:   Headroom left before the next LLM call (default 0.3 s).
+
+    Example:
+        extend_macro_to_interval("L_STICK@+000+100 B 1.5s", 5.0)
+        # → "L_STICK@+000+100 B 1.5s\\nL_STICK@+000+100 B 3.2s"
+    """
+    if not macro or _COMBAT_TOKENS.search(macro):
+        return macro
+
+    target = interval - buffer
+    current = sum(float(d) for d in _DURATION_RE.findall(macro))
+    remaining = round(target - current, 2)
+
+    if remaining < 0.2:
+        return macro
+
+    # Find the last line that has real input tokens (not a bare pause duration).
+    last_input_line = None
+    for line in reversed(macro.splitlines()):
+        if line.strip() and not _BARE_DURATION_LINE.match(line):
+            last_input_line = line
+            break
+
+    if last_input_line is None:
+        return macro
+
+    # Strip the trailing duration from that line to get the bare input tokens.
+    base = re.sub(r'\s+\d+(?:\.\d+)?s\s*$', '', last_input_line).strip()
+    if not base:
+        return macro
+
+    return macro.rstrip() + f'\n{base} {remaining}s'
 
 
 class Buttons:

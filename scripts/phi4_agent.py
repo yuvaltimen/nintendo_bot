@@ -59,7 +59,7 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switch_control import RemotePad, scrub_macro  # noqa: E402
+from switch_control import RemotePad, scrub_macro, extend_macro_to_interval  # noqa: E402
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 
@@ -334,6 +334,13 @@ def goal_loop(
         last_call_t = now
         history_str = "\n".join(action_history[-5:]) or "(none yet)"
 
+        # The interval is passed explicitly so the model knows how long its
+        # movement macros should run to keep Link moving continuously.
+        movement_target = round(interval - 0.5, 1)
+        interval_hint = (
+            f"interval: {interval}s — movement macros should be ~{movement_target}s total"
+        )
+
         if vision:
             annotated = state.get_annotated_frame()
             if annotated is None:
@@ -342,7 +349,8 @@ def goal_loop(
             image_b64 = encode_jpeg(annotated)
             system = SYSTEM_PROMPT_VISION
             user_text = (
-                f"Goal: {goal}\n\n"
+                f"Goal: {goal}\n"
+                f"{interval_hint}\n\n"
                 f"Recent actions:\n{history_str}\n\n"
                 "What should Link do next?"
             )
@@ -350,7 +358,9 @@ def goal_loop(
             image_b64 = None
             system = SYSTEM_PROMPT
             user_text = (
-                f"Goal: {goal}\n\n{state.get_scene()}\n\n"
+                f"Goal: {goal}\n"
+                f"{interval_hint}\n\n"
+                f"{state.get_scene()}\n\n"
                 f"Recent actions:\n{history_str}\n\n"
                 "What should Link do next?"
             )
@@ -379,21 +389,21 @@ def goal_loop(
 
         reasoning, macro_raw = parse_response(raw)
 
-        # Scrub comments from phi4's output and log any difference.
-        # nxbt crashes on tokens like "#" or "attack" — see scrub_macro() docs.
+        # 1. Scrub comments and normalize Unicode dashes.
         macro = scrub_macro(macro_raw) if macro_raw else ""
-        if macro != macro_raw:
-            stripped_lines = [
-                l for l in macro_raw.splitlines()
-                if l.strip() and not scrub_macro(l)
-            ]
-            print(
-                f"  [scrubbed] phi4 added {len(macro_raw) - len(macro)} chars of comments "
-                f"({len(stripped_lines)} lines dropped).",
-                flush=True,
-            )
+        if macro != macro_raw and macro_raw:
+            print(f"  [scrubbed] removed non-DSL content from phi4 output", flush=True)
             print(f"  [raw]    {macro_raw!r}", flush=True)
             print(f"  [clean]  {macro!r}", flush=True)
+
+        # 2. Auto-extend pure movement macros to fill the interval so Link
+        #    keeps moving continuously rather than stopping between decisions.
+        if macro:
+            extended = extend_macro_to_interval(macro, interval)
+            if extended != macro:
+                print(f"  [extended] movement macro padded to fill {interval}s interval",
+                      flush=True)
+                macro = extended
 
         state.set_phi4_status(reasoning=reasoning, macro=macro or "")
 
@@ -594,14 +604,26 @@ def main() -> None:
     parser.add_argument("--scale", type=float, default=0.65,
                         help="Display window scale factor (default: 0.65 to fit a MacBook).")
     parser.add_argument(
+        "--model", "-m",
+        default=None,
+        help=(
+            "Ollama model name to use (default: $OLLAMA_MODEL or phi4). "
+            "Examples: llama3.1:8b  llama3.2-vision:11b  llava  moondream"
+        ),
+    )
+    parser.add_argument(
         "--vision", action="store_true",
         help=(
-            "Send the YOLO-annotated frame as a JPEG image instead of a text scene description. "
-            "Requires a vision-capable model — set OLLAMA_MODEL to llama3.2-vision, llava, "
-            "moondream, or another Ollama vision model. Standard phi4 (text-only) will error."
+            "Send the YOLO-annotated frame as a JPEG instead of a text scene description. "
+            "Requires a vision-capable model: llama3.2-vision:11b, llava, moondream, etc."
         ),
     )
     args = parser.parse_args()
+
+    # --model overrides the environment variable
+    global OLLAMA_MODEL
+    if args.model:
+        OLLAMA_MODEL = args.model
 
     # ── pre-flight ─────────────────────────────────────────────────────────
     print(f"Checking Ollama ({OLLAMA_MODEL})... ", end="", flush=True)

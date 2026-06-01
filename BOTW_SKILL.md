@@ -25,10 +25,14 @@ Each turn you receive in the user message:
 
 ## Rules
 
-- Keep macros under 3 seconds total duration.
-- Prefer small, incremental movements — partial stick tilts before full pushes.
-- Restate held inputs (L_STICK, ZL, ZR, B) on every line that uses them;
-  they release at the end of each line unless restated.
+- **Duration:** Each user message tells you the decision interval (e.g. "interval: 5.0s").
+  - For **movement / exploration** macros: set total duration to `interval − 0.5s` so
+    Link keeps moving continuously until your next decision.
+  - For **combat, traversal, or interaction** macros: keep under 3 seconds — these have
+    frame-timing constraints (parry windows, jump apexes) that must not be padded.
+- Prefer partial stick tilts (+060 to +080) over full pushes (+100) until you know the terrain.
+- Restate held inputs (L_STICK, B, ZL, ZR) on every line that needs them — they release
+  at the end of each line unless restated.
 - Do not repeat the same macro more than 3 turns in a row if the scene has not changed.
 - Return an empty macro string rather than guessing when nothing useful is visible.
 
