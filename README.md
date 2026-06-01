@@ -8,82 +8,19 @@ The end goal: plug an HDMI capture card into the Mac, run YOLO + LLM on the capt
 
 ## SHORTCUT:
 
-On the Switch:
-
-`Go to Controller Pairing screen`
+On the Switch: go to `Controllers → Change Grip/Order` (first pair) or wake it from sleep.
 
 On the Pi:
-```
-sudo PYTHONUNBUFFERED=1 /home/yuvaltimen/nxbt/.venv/bin/python scripts/pi_daemon.py
+```bash
+sudo systemctl start switch-control
 ```
 
 From the Mac:
-```python
-python scripts/interactive.py
-
-# To connect and exit:
-pad.press(Buttons.A)  # x2
-
-# Or 
-
-python scripts/botw_macros.py horizon_scan
+```bash
+python scripts/interactive.py          # interactive REPL
+python scripts/botw_macros.py --list   # scripted macros
+CAPTURE_DEVICE=1 python scripts/phi4_agent.py  # LLM agent
 ```
-
-
-## USB Bluetooth dongle (if no Ethernet available)
-                                                                                                    
-A USB BT dongle has its own antenna completely separate from the Wi-Fi chip. Onboard Wi-Fi keeps
-working; the USB dongle handles the Switch connection.                                              
-                                                                 
-Buy: any USB Bluetooth 4.0+ dongle based on the Cambridge Silicon Radio (CSR8510) chip — widely     
-available for ~$10, well-supported by BlueZ. Avoid Broadcom-based USB dongles.                    
-                                                                                                    
-Setup:                                                                                            
-                                       
-### 1. Plug in the dongle. Verify BlueZ sees it:                                                    
-hciconfig -a 
-
-```
-Should show hci0 (onboard) and hci1 (USB dongle)
-```                                                  
- 
-### 2. Disable the onboard BT chip so nxbt picks up the USB dongle:
-
-```
-sudo rfkill block $(rfkill list | awk '/hci0/{print prev} {prev=$1}' | tr -d :)
-```
-
-##### Simpler alternative — disable onboard BT at firmware level (permanent):
-
-```
-echo 'dtoverlay=disable-bt' | sudo tee -a /boot/firmware/config.txt                                 
-sudo reboot                                                                                         
-```                                                                              
-### 3. After reboot, the USB dongle is now hci0. Verify:                                              
-
-```
-hciconfig -a    # should show one adapter: the USB dongle                                         
-rfkill list     # bluetooth should be unblocked
-```                                                     
-                                                                 
-### 4. The BlueZ --noplugin=input override still applies (already configured).                        
-### 5. Restart the daemon:     
-```
-sudo systemctl restart switch-control                                                               
-```                                                                                                  
-dtoverlay=disable-bt disables the UART connection to the BCM43455's BT module while leaving the SDIO
- connection (Wi-Fi) untouched. Wi-Fi keeps working. The USB dongle becomes the only BT adapter BlueZ
- and nxbt will see.                                                                                 
-                                                                 
-Verify it's working:                                                                                
-                                                                                                  
-### Watch the daemon start up and confirm it connects:                                                
-sudo journalctl -u switch-control -f                             
-                                                                                                    
-### From the Mac:                                                                                   
-curl -s http://raspberrypi.local:8765/status | python3 -m json.tool                                 
-# connected should be true with no repeated crashes      
-
 
 ---
 
@@ -233,13 +170,26 @@ With this, powering on the Pi is enough - the daemon starts, reconnects to the S
 
 ---
 
-## Mac: nothing
+## Mac dependencies
 
-The client is stdlib-only. No pip install on the Mac. Set the Pi hostname once:
+The core client (`switch_control/client.py`) is stdlib-only. The agent and vision scripts need additional packages:
+
+```bash
+# Required for vision_loop.py, agent_loop.py, phi4_agent.py:
+pip install opencv-python ultralytics
+
+# Required for agent_loop.py (Claude API) only:
+pip install anthropic
+```
+
+Set persistent environment variables once:
 
 ```bash
 # ~/.zshrc
-export PI_HOST=raspberrypi.local    # or the Pi's IP address
+export PI_HOST=raspberrypi.local       # or the Pi's IP
+export CAPTURE_DEVICE=1                # USB capture card device index
+export ANTHROPIC_API_KEY=sk-ant-...   # for agent_loop.py
+export OLLAMA_MODEL=phi4               # default model for phi4_agent.py
 ```
 
 ---
@@ -626,26 +576,34 @@ Cancellation uses a `threading.Event` (`stop_goal`) rather than `KeyboardInterru
 ### One-time setup
 
 ```bash
-# Pull the model (~9 GB, once):
-ollama pull phi4
+# opencv + ultralytics are required (see Mac dependencies above).
+# Pull a model — phi4 is the default, but llama3.1:8b reasons better:
+ollama pull phi4               # 14B, default — adequate for simple goals
+ollama pull llama3.1:8b        # 8B, faster + better directional reasoning
+ollama pull llama3.2-vision:11b  # 11B vision model, required for --vision mode
 
 # Verify:
-ollama list    # phi4 should appear
+ollama list
 ```
-
-No additional `pip install` — uses stdlib `urllib` for Ollama calls. OpenCV and ultralytics are already installed.
 
 ### Connecting and starting
 
 ```bash
+# Default (phi4):
 CAPTURE_DEVICE=1 python scripts/phi4_agent.py
+
+# Switch model at the command line:
+python scripts/phi4_agent.py --model llama3.1:8b
+
+# Vision mode — sends the annotated JPEG frame to the model instead of text:
+python scripts/phi4_agent.py --model llama3.2-vision:11b --vision
 ```
 
 Startup runs four pre-flight checks in order and tells you exactly what to fix if any step fails:
 
 ```
-Checking Ollama (phi4)...          phi4 is ready
-Connecting to Pi daemon (pi.local)... connected.
+Checking Ollama (llama3.1:8b)...   llama3.1:8b is ready
+Connecting to Pi daemon...         connected.
 Loading YOLO (yolov8n.pt)...       ready.
 Opening capture device 1...        1280x720.
 ```
@@ -730,19 +688,38 @@ Q in the display window follows the same path via the `cv2.waitKey` check in `di
 
 ### Tuning
 
-**Calibrate `--interval` to your machine first.** If `interval` is shorter than phi4's actual response time, the stop_goal event fires before the response arrives and the agent never sends anything.
+**`--model` — the most impactful single change.** phi4 (14B) struggles with spatial reasoning for complex goals. `llama3.1:8b` responds faster and makes more coherent directional decisions. `llama3.2-vision:11b` with `--vision` is the highest quality option — it sees the actual game frame.
 
 ```bash
-# Time a minimal phi4 response:
-time ollama run phi4 "Reply with the single word: ready"
+# Recommended default for most goals:
+python scripts/phi4_agent.py --model llama3.1:8b --interval 3.0
 
-# Set interval ~1-2 s above that:
-CAPTURE_DEVICE=1 python scripts/phi4_agent.py --interval 7.0
+# Best quality — sends the YOLO-annotated frame as an image:
+python scripts/phi4_agent.py --model llama3.2-vision:11b --vision --interval 8.0
+
+# Cheapest / fastest — phi4:
+python scripts/phi4_agent.py --model phi4 --interval 7.0
 ```
 
-On M1/M2 Pro, phi4 takes roughly 4–6 s for a 100-token response. 7–8 s is a safe interval. On M3 Max or faster, 4–5 s may work.
+**Calibrate `--interval` to your model.** If `interval` is shorter than the model's actual response time, the agent never gets to act.
 
-**Goal wording is the most impactful lever.** phi4 acts on the scene description it receives — be specific about what you want Link to do and what success looks like:
+```bash
+# Time a minimal response to calibrate:
+time ollama run llama3.1:8b "Reply with the single word: ready"
+# Set interval ~1-2 s above that.
+```
+
+Approximate response times on Apple Silicon M-series:
+
+| Model | Typical latency | Recommended interval |
+|---|---|---|
+| `phi4` | 4–7 s | `--interval 8.0` |
+| `llama3.1:8b` | 2–4 s | `--interval 4.0` |
+| `llama3.2-vision:11b` | 5–10 s | `--interval 10.0` |
+
+**Movement macros are automatically extended** to fill the interval so Link moves continuously between decisions. A macro that phi4 returns as `L_STICK@+000+100 B 1.5s` will be padded to `~interval - 0.5s` automatically. Combat/interaction macros are never extended (they have timing constraints).
+
+**Goal wording is the most impactful prompt lever.** Be specific about direction and success criteria:
 
 | Less effective | More effective |
 |---|---|
@@ -750,16 +727,16 @@ On M1/M2 Pro, phi4 takes roughly 4–6 s for a 100-token response. 7–8 s is a 
 | `"explore"` | `"walk forward along the dirt road and stop at any building"` |
 | `"find shrine"` | `"scan left and right with the camera looking for a glowing blue pillar"` |
 
-**`--scale`** adjusts the display window size. Default 0.65 fits a 13" MacBook screen. Increase to 1.0 on an external monitor:
+**`--scale`** adjusts the display window size. Default 0.65 fits a 13" MacBook screen:
 
 ```bash
-python scripts/phi4_agent.py --scale 1.0
+python scripts/phi4_agent.py --scale 1.0    # external monitor
 ```
 
-**`--yolo-model`** — swap to `models/botw.pt` once trained. phi4 reasons dramatically better with BotW-specific class names:
+**`--yolo-model`** — swap to `models/botw.pt` once trained. All models reason better with BotW-specific class names like "bokoblin" vs. COCO's "person":
 
 ```bash
-python scripts/phi4_agent.py --yolo-model models/botw.pt --interval 6.0
+python scripts/phi4_agent.py --model llama3.1:8b --yolo-model models/botw.pt
 ```
 
 ### Debugging
@@ -840,18 +817,17 @@ phi4 will repeat a macro if the scene description doesn't change between calls (
 2. Add more variety to the goal: `"explore, and if you've been doing the same thing for 3 turns, try something different"`.
 3. Look at the YOLO panel — if it's detecting the same `person` at the same position every frame, the character may be stuck against geometry and needs a different movement direction.
 
-### phi4 vs. Claude — when to use each
+### Choosing a model
 
-| | `phi4_agent.py` | `agent_loop.py` (Claude) |
-|---|---|---|
-| Cost | Free | ~$0.001–$0.01/call |
-| Latency | 3–8 s (local, M-series) | ~1 s (API) |
-| Privacy | Fully local | Frames sent to Anthropic |
-| Input | Text scene description | Annotated JPEG + JSON |
-| Quality | Good for YOLO-driven goals | Better for visual reasoning |
-| Best for | Long runs, iteration, cost-free testing | Best-quality final runs |
+| | `phi4` (default) | `llama3.1:8b` | `llama3.2-vision:11b --vision` | `agent_loop.py` (Claude) |
+|---|---|---|---|---|
+| Cost | Free | Free | Free | ~$0.001–$0.01/call |
+| Latency | 4–7 s | 2–4 s | 5–10 s | ~1 s |
+| Input | YOLO text | YOLO text | Annotated JPEG | Annotated JPEG + JSON |
+| Reasoning | Weak spatial | Good directional | Good visual | Best overall |
+| Best for | Simple movement | Most goals | When frame context matters | Production-quality runs |
 
-phi4 works well when the goal maps directly onto what YOLO detects — "move toward the person", "attack the enemy at screen-right". Claude's vision advantage matters when the game state can't be captured by bounding boxes alone: reading on-screen text, understanding terrain shape, or reacting to HUD states that YOLO doesn't label.
+Start with `llama3.1:8b` for general exploration goals. Switch to `llama3.2-vision:11b --vision` when the goal involves objects YOLO can't label (terrain shape, UI state, text on screen). Use `agent_loop.py` with Claude Sonnet for the highest-quality results.
 
 ---
 
@@ -1037,7 +1013,12 @@ pad.wait_connected()
 
 **bluetoothctl D-Bus agent** - the daemon spawns it automatically at startup. If you ever see `Authentication Failure (0x05)` running nxbt outside the daemon, this is why. The daemon handles it transparently.
 
-**Wi-Fi/BT antenna sharing on Pi 4** - the onboard radios share an antenna. Under heavy BT traffic, Wi-Fi load can cause reconnects. Fix: use Ethernet and `sudo rfkill block wifi`, or use a USB Bluetooth dongle.
+**Wi-Fi/BT antenna sharing on Pi 4** — the onboard radios share one antenna. Under sustained Bluetooth traffic (agent runs, macro loops), Wi-Fi load causes BT drops → `nxbt state=crashed` reconnect loops. Two fixes:
+
+- **Ethernet (best):** plug in a cable, then `sudo rfkill block wifi && sudo systemctl restart switch-control`. Eliminates contention entirely.
+- **USB Bluetooth dongle (~$10):** get a CSR8510-based dongle, plug it in, then disable onboard BT permanently: `echo 'dtoverlay=disable-bt' | sudo tee -a /boot/firmware/config.txt && sudo reboot`. The USB dongle becomes the only BT adapter; Wi-Fi is unaffected. Verify with `hciconfig -a` (one adapter), then restart the daemon.
+
+See the `nxbt state=crashed reconnect loop` troubleshooting entry for diagnosis commands.
 
 **Long macros and reconnects** - if BT drops mid-macro, the endpoint returns `NotConnected` and the macro is lost. After the watchdog reconnects, re-issue it. Break long sequences into chunks wrapped in `pad.run_resilient`.
 
@@ -1158,9 +1139,10 @@ export PI_HOST=<ip>
 nintendo/
 ├── README.md                        this file
 ├── PI_CONTROLLER.md                 deep BT surgery: stale-state wipe, Auth Failure tree, btmon
+├── BOTW_SKILL.md                    LLM skill reference: DSL syntax, button map, sequences
 ├── switch_control/
-│   ├── __init__.py                  re-exports RemotePad, Buttons, Sticks
-│   ├── client.py                    HTTP client (Mac, stdlib only)
+│   ├── __init__.py                  re-exports RemotePad, Buttons, Sticks, scrub_macro
+│   ├── client.py                    HTTP client + scrub_macro + extend_macro_to_interval
 │   ├── daemon.py                    HTTP server + watchdog (Pi only)
 │   └── pad.py                       nxbt wrapper (Pi only, used by daemon)
 ├── scripts/
@@ -1171,7 +1153,7 @@ nintendo/
 │   ├── botw_macros.py               15 BotW macros (town / combat / explore)
 │   ├── vision_loop.py               HDMI capture → YOLO → rule-based control
 │   ├── agent_loop.py                HDMI capture → YOLO → Claude → macros
-│   ├── phi4_agent.py                HDMI capture → YOLO → phi4 (Ollama) → macros, interactive REPL
+│   ├── phi4_agent.py                HDMI capture → YOLO → local Ollama model → macros (REPL)
 │   └── collect_frames.py            capture gameplay frames for YOLO training
 ├── models/
 │   └── botw.pt                      custom BotW YOLO model (after training)
@@ -1204,8 +1186,10 @@ nintendo/
 | Vision loop (live) | `CAPTURE_DEVICE=1 python scripts/vision_loop.py` |
 | Agent loop (dry-run) | `python scripts/agent_loop.py --goal "..." --dry-run` |
 | Agent loop (live) | `CAPTURE_DEVICE=1 python scripts/agent_loop.py --goal "..."` |
-| **phi4 agent (REPL)** | `CAPTURE_DEVICE=1 python scripts/phi4_agent.py` |
-| phi4 with custom model | `python scripts/phi4_agent.py --yolo-model models/botw.pt` |
+| **Local agent (REPL)** | `CAPTURE_DEVICE=1 python scripts/phi4_agent.py` |
+| Local agent — switch model | `python scripts/phi4_agent.py --model llama3.1:8b` |
+| Local agent — vision mode | `python scripts/phi4_agent.py --model llama3.2-vision:11b --vision` |
+| Local agent — custom YOLO | `python scripts/phi4_agent.py --model llama3.1:8b --yolo-model models/botw.pt` |
 | Capture training frames | `CAPTURE_DEVICE=1 python scripts/collect_frames.py --output data/raw` |
 | Train YOLO model | `yolo train data=dataset.yaml model=yolov8n.pt epochs=50 imgsz=640 device=mps` |
 | Agent with custom model | `python scripts/agent_loop.py --yolo-model models/botw.pt --goal "..."` |
