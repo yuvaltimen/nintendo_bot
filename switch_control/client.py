@@ -1,9 +1,38 @@
 """HTTP client for the Pi-side daemon. Stdlib only - runs on Mac or Pi."""
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
+
+
+def scrub_macro(script: str) -> str:
+    """Strip inline # comments and comment-only lines from a macro string.
+
+    nxbt's macro tokenizer splits each line on whitespace and tries to match
+    every token as a button name, stick value, or duration.  A trailing comment
+    like "Y 0.1s  # attack" produces the unknown token "#" followed by "attack",
+    which raises an exception inside the nxbt worker process.  That exception
+    kills the worker, putting the controller into state=crashed and triggering
+    the daemon's reconnect cycle.
+
+    This function is applied automatically inside RemotePad.macro() so all
+    callers are protected.  Agents can also call it explicitly before the
+    pad.macro() call to log what was stripped for diagnostics.
+
+    Rules:
+    - Everything from the first # to end-of-line is removed.
+    - Lines that become empty after stripping are dropped entirely.
+    - Indentation is preserved (important for LOOP blocks).
+    - Returns empty string if the whole script reduces to nothing.
+    """
+    cleaned_lines = []
+    for line in script.splitlines():
+        clean = re.sub(r'\s*#.*$', '', line)
+        if clean.strip():
+            cleaned_lines.append(clean)
+    return '\n'.join(cleaned_lines)
 
 
 class Buttons:
@@ -141,6 +170,10 @@ class RemotePad:
 
     def macro(self, script: str, block: bool = True, timeout: float = 120.0,
               retries: int = 0, recover_timeout: float = 20.0):
+        script = scrub_macro(script)
+        if not script:
+            # Nothing left after stripping comments — skip the HTTP call entirely.
+            return {"ok": True, "skipped": "empty after comment scrub"}
         return self._send(
             "/macro", {"script": script, "block": block, "timeout": timeout},
             retries, recover_timeout,

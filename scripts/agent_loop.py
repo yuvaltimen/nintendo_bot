@@ -53,54 +53,32 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switch_control import RemotePad  # noqa: E402
+from switch_control import RemotePad, scrub_macro  # noqa: E402
 
 FRAME_W = 1280
 FRAME_H = 720
 
-CONTROLLER_REFERENCE = """\
-Pro Controller inputs (macro string format):
-  Movement   L_STICK@+000+100 (forward)  L_STICK@+000-100 (back)
-             L_STICK@+100+000 (right)    L_STICK@-100+000 (left)
-             Diagonals: L_STICK@+070+070 — values -100 to +100
-  Camera     R_STICK@+100+000 (pan right)  R_STICK@-100+000 (pan left)
-             R_STICK@+000-100 (look up)    R_STICK@+000+100 (look down)
-  Actions    A (interact/climb)  B (jump)  Y (attack)  X (paraglider mid-air)
-  Triggers   ZL (raise shield / lock-on, hold)  ZR (draw bow / aim, hold)
-  Other      PLUS (map/inventory)  MINUS (whistle/quick menu)
-             DPAD_UP/DOWN/LEFT/RIGHT (weapon quick-select)
-  Combos     ZL + L_STICK@+000-100 + B  →  backflip dodge
-             ZL + A                      →  shield parry
-             L_STICK@+000+100 + B 0.7s then X 0.1s  →  run-jump + paraglider
+# ── skill file ────────────────────────────────────────────────────────────────
 
-Macro format: items on one line fire simultaneously for the trailing duration.
-  "L_STICK@+000+100 B 0.7s"   move forward + jump together for 0.7s
-  "Y 0.1s\\n0.3s\\nY 0.1s"      attack, wait, attack again
-  "ZR 1.2s"                    hold bow for 1.2s then release (fires arrow)
-  "LOOP 3\\n    Y 0.1s\\n    0.3s"  attack 3 times"""
+_SKILL_PATH = Path(__file__).resolve().parent.parent / "BOTW_SKILL.md"
 
+def _load_skill() -> str:
+    """Load BOTW_SKILL.md from the repo root. Falls back to a minimal inline
+    reference if the file is missing (e.g. running outside the repo)."""
+    if _SKILL_PATH.exists():
+        return _SKILL_PATH.read_text(encoding="utf-8")
+    # Minimal fallback
+    return (
+        "Pro Controller macro syntax: items on one line fire simultaneously.\n"
+        "B=sprint/dodge  X=jump/paraglider  Y=attack  A=interact  ZL=shield  ZR=bow\n"
+        "L_STICK@+000+100=forward  R_STICK@+100+000=camera right\n"
+    )
 
-def build_system_prompt(goal: str) -> str:
-    return f"""You are an AI agent playing The Legend of Zelda: Breath of the Wild.
-Your current goal: {goal}
-
-Each turn you receive:
-1. A screenshot with YOLO bounding boxes drawn on any detected objects.
-2. A JSON array of those detections, each with: label, confidence, and normalised
-   screen position (cx/cy where 0.0 = left/top edge, 1.0 = right/bottom edge).
-3. A list of the last few actions you took.
-
-Respond with exactly this JSON object and nothing else:
-{{"reasoning": "<one sentence: what you see and why you chose this action>",
-  "macro": "<macro string to execute, or empty string to wait this tick>"}}
-
-{CONTROLLER_REFERENCE}
-
-Rules:
-- Keep macros short (3 seconds or less total duration).
-- Prefer safe, incremental actions — small stick tilts rather than full pushes.
-- If nothing interesting is visible or you are unsure, return an empty macro string.
-- Do not repeat the same macro more than 3 times in a row if it hasn't produced visible change."""
+# BOTW_SKILL is the complete system prompt — edit BOTW_SKILL.md to change
+# the agent's instructions, button reference, or helpful sequences.
+# The goal is passed in each user turn, not the system prompt, so the
+# system prompt stays constant and the Anthropic prompt cache stays warm.
+BOTW_SKILL = _load_skill()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -148,6 +126,42 @@ def detections_to_json(results) -> list[dict]:
     return out
 
 
+def _parse_response(raw: str) -> tuple[str, str]:
+    """Extract (reasoning, macro) from LLM response, tolerating extra text."""
+    import re as _re
+
+    def _from_obj(obj: dict) -> tuple[str, str]:
+        return obj.get("reasoning", ""), obj.get("macro", "")
+
+    # 1. Strip markdown fences, try direct parse.
+    cleaned = raw.strip()
+    for fence in ("```json", "```"):
+        if cleaned.startswith(fence):
+            cleaned = cleaned[len(fence):]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+    try:
+        return _from_obj(json.loads(cleaned))
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Extract first {...} block from anywhere in the response.
+    match = _re.search(r'\{[^{]+\}', raw, _re.DOTALL)
+    if match:
+        try:
+            return _from_obj(json.loads(match.group()))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Raw macro fallback.
+    first = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    if any(first.startswith(p) for p in ("L_STICK", "R_STICK", "A ", "B ", "Y ", "ZL", "ZR", "LOOP", "DPAD")):
+        return "(raw macro)", first
+
+    return "(parse error)", ""
+
+
 def call_claude(
     client,
     annotated_frame,
@@ -167,9 +181,9 @@ def call_claude(
         system=[
             {
                 "type": "text",
-                "text": build_system_prompt(goal),
-                # Cache the system prompt — it's constant across the whole session.
-                # At 2s call interval the cache stays warm (TTL is 5 min).
+                "text": BOTW_SKILL,
+                # System prompt is now fully static (goal is in the user turn),
+                # so the cache stays warm across goal changes too.
                 "cache_control": {"type": "ephemeral"},
             }
         ],
@@ -188,6 +202,7 @@ def call_claude(
                     {
                         "type": "text",
                         "text": (
+                            f"Goal: {goal}\n\n"
                             f"Detections:\n{json.dumps(detections, indent=2)}\n\n"
                             f"Recent actions:\n{history_str}\n\n"
                             "What should Link do next?"
@@ -199,11 +214,7 @@ def call_claude(
     )
 
     raw = response.content[0].text.strip()
-    try:
-        parsed = json.loads(raw)
-        return parsed.get("reasoning", ""), parsed.get("macro", "")
-    except json.JSONDecodeError:
-        return "(response parse error)", raw
+    return _parse_response(raw)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -262,9 +273,14 @@ def run_agent(
             if now - last_call_t >= agent_interval:
                 last_call_t = now
                 try:
-                    reasoning, macro = call_claude(
+                    reasoning, macro_raw = call_claude(
                         client, results.plot(), results, goal, action_history, claude_model
                     )
+                    macro = scrub_macro(macro_raw) if macro_raw else ""
+                    if macro != macro_raw:
+                        print(f"[scrubbed] Claude added comments — stripped {len(macro_raw) - len(macro)} chars")
+                        print(f"[raw]      {macro_raw!r}")
+                        print(f"[clean]    {macro!r}")
                     last_reasoning = reasoning
                     last_macro = macro or ""
 

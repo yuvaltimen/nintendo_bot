@@ -6,6 +6,6 @@ The package is import-safe on both Mac and Pi. Submodules have platform constrai
   - switch_control.daemon    - Pi only (imports nxbt + fastapi)
 """
 
-from .client import RemotePad, Buttons, Sticks
+from .client import RemotePad, Buttons, Sticks, scrub_macro
 
-__all__ = ["RemotePad", "Buttons", "Sticks"]
+__all__ = ["RemotePad", "Buttons", "Sticks", "scrub_macro"]

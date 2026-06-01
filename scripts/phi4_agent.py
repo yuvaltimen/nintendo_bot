@@ -59,7 +59,7 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switch_control import RemotePad  # noqa: E402
+from switch_control import RemotePad, scrub_macro  # noqa: E402
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 
@@ -67,63 +67,27 @@ FRAME_W, FRAME_H = 1280, 720
 OLLAMA_HOST  = os.environ.get("OLLAMA_HOST",  "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "phi4")
 
-# ── prompt ────────────────────────────────────────────────────────────────────
+# ── skill file ────────────────────────────────────────────────────────────────
 
-CONTROLLER_REF = """\
-Nintendo Switch Pro Controller — macro string syntax:
-  Movement   L_STICK@+000+100 (forward)  L_STICK@+000-100 (back)
-             L_STICK@+100+000 (right)    L_STICK@-100+000 (left)
-             Diagonals OK: L_STICK@+070+070  (values -100 to +100)
-  Camera     R_STICK@+100+000 (pan right)  R_STICK@-100+000 (pan left)
-             R_STICK@+000-100 (look up)    R_STICK@+000+100 (look down)
-  Actions    A (interact)  X (jump, activate paraglider mid-air, perform a jump climb) Y (attack) B (hold to run, cancel paraglider mid-air)
-  Triggers   ZL (raise shield/lock-on hold)  ZR (draw bow/aim hold)
-  Other      PLUS (map)  MINUS (whistle)  DPAD_UP/DOWN/LEFT/RIGHT
-  Combos     ZL + L_STICK@+000-100 + B  →  backflip dodge
-             ZL + A                     →  shield parry
-Macro format: items on one line fire simultaneously for their duration.
-  "L_STICK@+000+100 B 0.7s"   run + jump together for 0.7 s
-  "Y 0.1s\\n0.3s\\nY 0.1s"      attack, pause, attack
-  "ZR 1.5s"                   hold bow 1.5 s (releasing fires the arrow)
-  ""                          do nothing this tick"""
+_SKILL_PATH = Path(__file__).resolve().parent.parent / "BOTW_SKILL.md"
 
-SYSTEM_PROMPT = f"""You are an AI agent playing The Legend of Zelda: Breath of the Wild.
+def _load_skill() -> str:
+    """Load BOTW_SKILL.md from the repo root. Falls back to a minimal inline
+    reference if the file is missing."""
+    if _SKILL_PATH.exists():
+        return _SKILL_PATH.read_text(encoding="utf-8")
+    return (
+        "Pro Controller macro syntax: items on one line fire simultaneously.\n"
+        "B=sprint/dodge  X=jump/paraglider  Y=attack  A=interact  ZL=shield  ZR=bow\n"
+        "L_STICK@+000+100=forward  R_STICK@+100+000=camera right\n"
+    )
 
-Each turn you receive a text description of the game scene (objects detected by YOLO
-with their screen positions), a list of recent actions, and the current goal.
-
-Respond with ONLY a valid JSON object — no extra text, no markdown fences:
-{{"reasoning": "<one sentence: what you see and why you chose this action>",
-  "macro": "<macro string to execute, or empty string to wait this tick>"}}
-
-{CONTROLLER_REF}
-
-Rules:
-- Keep macros under 3 seconds total duration.
-- Prefer small, incremental movements.
-- If nothing useful is visible, evaluate surroundings in the vicinity until you find something.
-- Do not repeat the same macro more than 3 turns in a row if the scene has not changed.
-"""
-
-# Vision-mode system prompt — used when --vision is set and a vision-capable
-# model (e.g. llama3.2-vision, llava, moondream) is selected via OLLAMA_MODEL.
-# The LLM receives the YOLO-annotated frame as a JPEG image instead of a text
-# scene description, so we drop the "detected objects" framing.
-SYSTEM_PROMPT_VISION = f"""You are an AI agent playing The Legend of Zelda: Breath of the Wild.
-
-Each turn you receive a screenshot from the game with YOLO bounding boxes drawn on any detected
-objects. A list of your recent actions is included in the text.
-
-Respond with ONLY a valid JSON object — no extra text, no markdown fences:
-{{"reasoning": "<one sentence: what you see and why you chose this action>",
-  "macro": "<macro string to execute, or empty string to wait this tick>"}}
-
-{CONTROLLER_REF}
-
-Rules:
-- Keep macros under 3 seconds total duration.
-- Prefer small, incremental movements.
-- Do not repeat the same macro more than 3 turns in a row if the scene has not changed."""
+# BOTW_SKILL is the complete system prompt — agent instructions, response
+# format, rules, button reference, and helpful sequences all live in
+# BOTW_SKILL.md. Edit that file; both text and vision modes use it directly.
+BOTW_SKILL = _load_skill()
+SYSTEM_PROMPT = BOTW_SKILL
+SYSTEM_PROMPT_VISION = BOTW_SKILL
 
 
 # ── image encoding ────────────────────────────────────────────────────────────
@@ -298,19 +262,46 @@ def call_phi4(
 
 
 def parse_response(raw: str) -> tuple[str, str]:
-    cleaned = (
-        raw.strip()
-        .removeprefix("```json").removeprefix("```")
-        .removesuffix("```").strip()
-    )
-    try:
-        obj = json.loads(cleaned)
+    """Extract (reasoning, macro) from the model's response.
+
+    phi4 sometimes wraps the JSON in explanation text or markdown fences even
+    when instructed not to. This function tries several strategies in order so
+    that most real-world model outputs are recovered cleanly.
+    """
+    import re as _re
+
+    def _from_obj(obj: dict) -> tuple[str, str]:
         return obj.get("reasoning", ""), obj.get("macro", "")
+
+    # 1. Strip common markdown fences and try a direct parse.
+    cleaned = raw.strip()
+    for fence in ("```json", "```"):
+        if cleaned.startswith(fence):
+            cleaned = cleaned[len(fence):]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+    try:
+        return _from_obj(json.loads(cleaned))
     except json.JSONDecodeError:
-        first = raw.strip().splitlines()[0].strip() if raw.strip() else ""
-        if any(first.startswith(p) for p in ("L_STICK", "R_STICK", "A ", "B ", "Y ", "ZL", "ZR")):
-            return "(raw macro)", first
-        return "(parse error)", ""
+        pass
+
+    # 2. Find the first {...} block in the raw output.
+    #    phi4 often writes a sentence, then the JSON on a new line.
+    match = _re.search(r'\{[^{]+\}', raw, _re.DOTALL)
+    if match:
+        try:
+            return _from_obj(json.loads(match.group()))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. If the response itself looks like a raw macro string (model forgot JSON),
+    #    use the first line as the macro.
+    first = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    if any(first.startswith(p) for p in ("L_STICK", "R_STICK", "A ", "B ", "Y ", "ZL", "ZR", "LOOP", "DPAD")):
+        return "(raw macro)", first
+
+    return "(parse error)", ""
 
 
 # ── REPL thread ───────────────────────────────────────────────────────────────
@@ -386,7 +377,24 @@ def goal_loop(
         if state.stop_goal.is_set() or not raw:
             break
 
-        reasoning, macro = parse_response(raw)
+        reasoning, macro_raw = parse_response(raw)
+
+        # Scrub comments from phi4's output and log any difference.
+        # nxbt crashes on tokens like "#" or "attack" — see scrub_macro() docs.
+        macro = scrub_macro(macro_raw) if macro_raw else ""
+        if macro != macro_raw:
+            stripped_lines = [
+                l for l in macro_raw.splitlines()
+                if l.strip() and not scrub_macro(l)
+            ]
+            print(
+                f"  [scrubbed] phi4 added {len(macro_raw) - len(macro)} chars of comments "
+                f"({len(stripped_lines)} lines dropped).",
+                flush=True,
+            )
+            print(f"  [raw]    {macro_raw!r}", flush=True)
+            print(f"  [clean]  {macro!r}", flush=True)
+
         state.set_phi4_status(reasoning=reasoning, macro=macro or "")
 
         if macro and not state.stop_goal.is_set():
