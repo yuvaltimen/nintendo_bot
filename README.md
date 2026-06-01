@@ -30,7 +30,9 @@ Pi already set up and paired at least once? This is all you need:
 
 ```bash
 # 1. Start (or confirm) the daemon on the Pi
-ssh pi "sudo systemctl start switch-control"
+ssh pi
+cd nintendo_bot
+sudo PYTHONUNBUFFERED=1 /home/yuvaltimen/nxbt/.venv/bin/python scripts/pi_daemon.py
 
 # 2. Wake the Switch - press any button on your joycons
 
