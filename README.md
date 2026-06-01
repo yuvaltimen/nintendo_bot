@@ -1164,7 +1164,8 @@ nintendo/
 │   ├── daemon.py                    HTTP server + watchdog (Pi only)
 │   └── pad.py                       nxbt wrapper (Pi only, used by daemon)
 ├── scripts/
-│   ├── pi_daemon.py                 entry point: run on the Pi
+│   ├── pi_daemon.py                 entry point: run on the Pi (HTTP daemon)
+│   ├── pi_macro_loop.py             run directly on the Pi — cycles attack/defense/explore
 │   ├── interactive.py               entry point: run on the Mac, REPL
 │   ├── example_handoff.py           handoff demo
 │   ├── botw_macros.py               15 BotW macros (town / combat / explore)
@@ -1195,6 +1196,9 @@ nintendo/
 | Mac REPL | `python scripts/interactive.py` |
 | List BotW macros | `python scripts/botw_macros.py --list` |
 | Run a BotW macro | `python scripts/botw_macros.py <name>` |
+| Pi macro loop (no daemon) | `sudo /home/yuvaltimen/nxbt/.venv/bin/python scripts/pi_macro_loop.py` |
+| Pi macro loop (one cycle) | `sudo ... pi_macro_loop.py --once` |
+| Pi macro loop (start at defense) | `sudo ... pi_macro_loop.py --start defense --break 3` |
 | Scan capture devices | `python scripts/vision_loop.py --scan` |
 | Vision loop (dry-run) | `python scripts/vision_loop.py --device 1 --dry-run` |
 | Vision loop (live) | `CAPTURE_DEVICE=1 python scripts/vision_loop.py` |
