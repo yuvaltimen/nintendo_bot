@@ -113,8 +113,10 @@ class SharedState:
         self._lock = threading.Lock()
 
         # Written by main thread, read by REPL thread
-        self._scene_desc: str = "No detections yet."
-        self._latest_annotated = None   # clean YOLO-annotated frame (no display overlays)
+        self._scene_desc: str  = "No detections yet."
+        self._latest_frame     = None   # raw BGR frame
+        self._latest_results   = None   # ultralytics Results object
+        self._latest_annotated = None   # YOLO-annotated frame (no display overlays)
 
         # Written by REPL thread, read by main thread for display
         self._goal:         str  = ""
@@ -131,9 +133,12 @@ class SharedState:
         with self._lock:
             self._scene_desc = desc
 
-    def set_annotated_frame(self, frame) -> None:
+    def set_frame_data(self, raw_frame, results, annotated_frame) -> None:
+        """Store all three frame representations atomically."""
         with self._lock:
-            self._latest_annotated = frame
+            self._latest_frame     = raw_frame
+            self._latest_results   = results
+            self._latest_annotated = annotated_frame
 
     # ── REPL thread writes ────────────────────────────────────────────────
     def set_goal(self, goal: str) -> None:
@@ -161,9 +166,10 @@ class SharedState:
         with self._lock:
             return self._scene_desc
 
-    def get_annotated_frame(self):
+    def get_frame_data(self):
+        """Returns (raw_frame, results, annotated_frame)."""
         with self._lock:
-            return self._latest_annotated
+            return self._latest_frame, self._latest_results, self._latest_annotated
 
     def has_active_goal(self) -> bool:
         with self._lock:
@@ -192,6 +198,171 @@ def describe_scene(results) -> str:
         v_pos = "top"    if cy < 0.33 else ("middle"  if cy < 0.67 else "bottom")
         lines.append(f"  - {label} ({conf:.0%}) at screen {h_pos}/{v_pos}")
     return "Detected objects:\n" + "\n".join(lines)
+
+
+# ── rule-based policy (used with --rules, no LLM required) ──────────────────
+
+# YOLO class names treated as enemies.
+# Works with COCO model ("person") and any custom BotW model.
+# Add or remove entries here to tune the detection set.
+ENEMY_CLASSES: frozenset[str] = frozenset({
+    "person",                                              # COCO fallback
+    "bokoblin", "blue_bokoblin", "silver_bokoblin", "gold_bokoblin",
+    "lizalfos", "moblin", "lynel", "guardian", "hinox", "talus",
+})
+
+RULE_CONF_THRESHOLD = 0.45   # ignore detections below this confidence
+
+# Pre-built macro strings for each rule action.
+# Edit these to change how Link responds to each situation.
+_RULE_DODGE_LEFT  = "ZL L_STICK@-100+000 B 0.15s\n0.6s"
+_RULE_DODGE_RIGHT = "ZL L_STICK@+100+000 B 0.15s\n0.6s"
+
+_RULE_DEFEND = (
+    "ZL 0.1s\n"
+    "ZL 1.5s\n"
+    "ZL A 0.12s\n"
+    "0.5s\n"
+    "Y 0.15s\n0.2s\n"
+    "Y 0.15s\n0.2s\n"
+    "Y 0.15s\n0.5s"
+)
+
+_RULE_ATTACK = (
+    "L_STICK@+000+080 0.4s\n0.1s\n"
+    "Y 0.1s\n0.3s\n"
+    "Y 0.1s\n0.3s\n"
+    "Y 0.1s\n0.3s\n"
+    "Y 0.1s\n0.5s\n"
+    "L_STICK@-100+000 B 0.15s\n0.6s\n"
+    "L_STICK@+000+080 0.3s\n"
+    "Y 0.1s\n0.3s"
+)
+
+_RULE_PARAGLIDE = (
+    "L_STICK@+000+100 B 0.7s\n"
+    "L_STICK@+000+100 B X 0.1s\n"
+    "L_STICK@+000+100 0.5s\n"
+    "L_STICK@+000+100 X 0.1s\n"
+    "L_STICK@+000+100 0.8s"
+)
+
+
+def _detect_water_by_color(frame, min_fraction: float = 0.12) -> bool:
+    """
+    Rough water detection using color analysis on the bottom third of the frame.
+    BotW water is typically bright blue/teal. Returns True if enough of the
+    bottom region matches that hue profile.
+
+    Tune min_fraction up if you get false positives (blue sky at the horizon),
+    or down if water isn't being detected.
+    """
+    frame_h = frame.shape[0]
+    region = frame[frame_h * 2 // 3:, :]     # bottom third, BGR
+    # cv2/ultralytics already load numpy; no import needed
+    b = region[:, :, 0].astype("int32")
+    g = region[:, :, 1].astype("int32")
+    r = region[:, :, 2].astype("int32")
+    water_pixels = (b - r > 25) & (b - g > 10) & (b > 90)
+    return float(water_pixels.mean()) > min_fraction
+
+
+def rule_policy(frame, results, w: int, _h: int, interval: float) -> tuple[str, str]:
+    """
+    Rule-based policy — runs every interval tick with no LLM involved.
+    Returns (rule_name, macro_string).
+
+    Priority order:
+    1. Large enemy bounding box (close range) → dodge away from enemy + defend
+    2. Medium enemy box (mid range)           → full attack combo
+    3. Small enemy box (far)                  → approach in enemy's direction
+    4. Water detected by color heuristic      → sprint off ledge + paraglide
+    5. Default                                → keep moving forward
+
+    To customise behaviour, edit ENEMY_CLASSES, RULE_CONF_THRESHOLD,
+    _RULE_ATTACK, _RULE_DEFEND, _RULE_PARAGLIDE above, or add new rules here.
+    """
+    dur = round(max(0.5, interval - 0.5), 1)   # duration for movement hold
+
+    enemies: list[tuple[str, float, float, float]] = []
+    if results is not None and results.boxes is not None:
+        for box in results.boxes:
+            cls_name = results.names[int(box.cls)]
+            conf     = float(box.conf)
+            if cls_name in ENEMY_CLASSES and conf >= RULE_CONF_THRESHOLD:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                cx    = (x1 + x2) / 2
+                box_w = x2 - x1
+                enemies.append((cls_name, conf, cx, box_w))
+
+    if enemies:
+        # Sort by bounding box width: wider = closer
+        enemies.sort(key=lambda e: e[3], reverse=True)
+        cls_name, conf, cx, box_w = enemies[0]
+        label = f"{cls_name} {conf:.0%}"
+
+        if box_w > w * 0.35:
+            # Very close — dodge away from the enemy's side, then parry
+            dodge = _RULE_DODGE_LEFT if cx > w / 2 else _RULE_DODGE_RIGHT
+            return f"defend ({label})", dodge + "\n" + _RULE_DEFEND
+
+        if box_w > w * 0.15:
+            # Mid range — attack
+            return f"attack ({label})", _RULE_ATTACK
+
+        # Far — approach in the direction of the enemy
+        if cx < w * 0.35:
+            return f"approach-left ({label})", f"L_STICK@-060+080 B {dur}s"
+        if cx > w * 0.65:
+            return f"approach-right ({label})", f"L_STICK@+060+080 B {dur}s"
+        return f"approach ({label})", f"L_STICK@+000+090 B {dur}s"
+
+    # Water detected in the lower frame by color → paraglide
+    if frame is not None and _detect_water_by_color(frame):
+        return "paraglide (water ahead)", _RULE_PARAGLIDE
+
+    # Default: keep moving forward
+    return "explore", f"L_STICK@+000+080 B {dur}s"
+
+
+def rules_loop(pad: RemotePad, state: SharedState, interval: float) -> None:
+    """
+    Rule-based agent loop — no LLM, no prompts, no latency.
+
+    Runs on the REPL thread. Checks YOLO detections every `interval` seconds
+    and sends the macro returned by rule_policy(). Ctrl-C or Q in the display
+    window stops it via state.stop_goal.
+    """
+    print(f"[rules] interval: {interval}s | Edit rule_policy() to customise.\n",
+          flush=True)
+
+    last_action_t = 0.0
+
+    while not state.stop_goal.is_set() and not state.exit_app.is_set():
+        now = time.time()
+        if now - last_action_t < interval:
+            time.sleep(0.02)
+            continue
+
+        last_action_t = now
+        frame, results, _ = state.get_frame_data()
+
+        if frame is None or results is None:
+            time.sleep(0.05)
+            continue
+
+        h_px, w_px = frame.shape[:2]
+        rule_name, macro_raw = rule_policy(frame, results, w_px, h_px, interval)
+        macro = scrub_macro(macro_raw)
+
+        state.set_phi4_status(reasoning=f"[rule] {rule_name}", macro=macro or "")
+
+        if macro and not state.stop_goal.is_set():
+            try:
+                pad.macro(macro, retries=2, recover_timeout=15.0)
+                print(f"  [{rule_name}]  {macro!r}", flush=True)
+            except Exception as e:
+                print(f"  [pad error]  {e}", flush=True)
 
 
 # ── Ollama ────────────────────────────────────────────────────────────────────
@@ -342,7 +513,7 @@ def goal_loop(
         )
 
         if vision:
-            annotated = state.get_annotated_frame()
+            _, _, annotated = state.get_frame_data()
             if annotated is None:
                 time.sleep(0.1)
                 continue
@@ -420,8 +591,24 @@ def goal_loop(
             print(f"  [wait]   {reasoning or '(no action)'}", flush=True)
 
 
-def repl_thread_fn(pad: RemotePad, state: SharedState, interval: float, vision: bool = False) -> None:
+def repl_thread_fn(
+    pad: RemotePad,
+    state: SharedState,
+    interval: float,
+    vision: bool = False,
+    rules: bool = False,
+) -> None:
     """Runs in a background daemon thread. Owns the terminal prompt."""
+
+    if rules:
+        # Rules mode: skip Ollama and the REPL entirely, just run rule_policy forever.
+        state.set_goal("[rules mode]")
+        try:
+            rules_loop(pad, state, interval)
+        finally:
+            state.clear_goal()
+        return
+
     mode_line = "vision (annotated JPEG → LLM)" if vision else "text (YOLO detections → LLM)"
     print(f"""
 phi4 Agent — Breath of the Wild
@@ -496,11 +683,11 @@ def display_loop(
         results = yolo(frame, verbose=False)[0]
 
         # Push latest scene data to shared state for the REPL thread.
-        # Store the clean annotated frame (YOLO boxes only, no display overlays)
-        # before we mutate it with fps text / goal / reasoning overlays.
+        # Store raw frame + results + clean annotated frame before adding overlays.
+        # Rules loop reads raw frame + results; vision mode reads annotated frame.
         annotated_clean = results.plot()
         state.set_scene(describe_scene(results))
-        state.set_annotated_frame(annotated_clean)
+        state.set_frame_data(frame, results, annotated_clean)
 
         goal, reasoning, macro, in_phi4 = state.get_display_info()
 
@@ -599,16 +786,19 @@ def main() -> None:
                         default=int(os.environ.get("CAPTURE_DEVICE", "0")))
     parser.add_argument("--yolo-model",
                         default=os.environ.get("YOLO_MODEL", "yolov8n.pt"))
-    parser.add_argument("--interval", type=float, default=5.0,
-                        help="Seconds between LLM calls (default: 5.0).")
+    parser.add_argument("--interval", type=float, default=None,
+                        help=(
+                            "Seconds between decisions. "
+                            "Default: 0.5 for --rules mode, 5.0 for LLM mode."
+                        ))
     parser.add_argument("--scale", type=float, default=0.65,
                         help="Display window scale factor (default: 0.65 to fit a MacBook).")
     parser.add_argument(
         "--model", "-m",
         default=None,
         help=(
-            "Ollama model name to use (default: $OLLAMA_MODEL or phi4). "
-            "Examples: llama3.1:8b  llama3.2-vision:11b  llava  moondream"
+            "Ollama model name (default: $OLLAMA_MODEL or phi4). "
+            "Examples: llama3.1:8b  llama3.2-vision:11b  llava"
         ),
     )
     parser.add_argument(
@@ -618,7 +808,18 @@ def main() -> None:
             "Requires a vision-capable model: llama3.2-vision:11b, llava, moondream, etc."
         ),
     )
+    parser.add_argument(
+        "--rules", action="store_true",
+        help=(
+            "Use the rule-based policy instead of an LLM. "
+            "No Ollama required. Checks YOLO detections each interval and sends macros "
+            "based on enemy proximity and water detection. Edit rule_policy() to customise."
+        ),
+    )
     args = parser.parse_args()
+
+    # Resolve interval default based on mode
+    interval = args.interval if args.interval is not None else (0.5 if args.rules else 5.0)
 
     # --model overrides the environment variable
     global OLLAMA_MODEL
@@ -626,12 +827,16 @@ def main() -> None:
         OLLAMA_MODEL = args.model
 
     # ── pre-flight ─────────────────────────────────────────────────────────
-    print(f"Checking Ollama ({OLLAMA_MODEL})... ", end="", flush=True)
-    ok, msg = check_ollama()
-    if not ok:
-        print(f"FAIL\n\n{msg}")
-        sys.exit(1)
-    print(msg)
+    if not args.rules:
+        print(f"Checking Ollama ({OLLAMA_MODEL})... ", end="", flush=True)
+        ok, msg = check_ollama()
+        if not ok:
+            print(f"FAIL\n\n{msg}")
+            sys.exit(1)
+        print(msg)
+    else:
+        print(f"Rules mode — Ollama not required.")
+        print(f"  Edit ENEMY_CLASSES and rule_policy() in phi4_agent.py to customise.")
 
     print(f"Connecting to Pi daemon ({os.environ.get('PI_HOST', 'raspberrypi.local')})... ", end="", flush=True)
     pad = RemotePad(os.environ.get("PI_HOST", "raspberrypi.local"))
@@ -660,16 +865,16 @@ def main() -> None:
     state = SharedState()
     install_signal_handler(state, pad)
 
-    if args.vision:
+    if args.vision and not args.rules:
         print("Vision mode: annotated JPEG will be sent to the LLM each call.")
         print(f"  Make sure OLLAMA_MODEL ({OLLAMA_MODEL}) is a vision-capable model.\n")
 
-    # ── start REPL in background thread ───────────────────────────────────
+    # ── start REPL/rules thread ────────────────────────────────────────────
     t = threading.Thread(
         target=repl_thread_fn,
-        args=(pad, state, args.interval),
-        kwargs={"vision": args.vision},
-        daemon=True,   # exits automatically when main thread exits
+        args=(pad, state, interval),
+        kwargs={"vision": args.vision, "rules": args.rules},
+        daemon=True,
     )
     t.start()
 
